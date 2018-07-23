@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
 
 #if 1 /* This needs firmware v1.0.0-rc6 or later. */
 	// Packing: 1 - 12 bits, 0 - 16 bits
-	rc = airspy_set_packing(device, 1);
+	rc = airspy_set_packing(device, 0);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, "airspy_set_packing() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
