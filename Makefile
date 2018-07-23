@@ -3,6 +3,7 @@
 #
 
 CFLAGS = -Wall
+LDFLAGS = -lpthread
 
 # The default location for pkg is /usr/lib64/pkgconfig and /usr/share/pkgconfig
 # but the airspy's cmak-ed stuff ends in /usr/local/lib/pkgconfig. So whatever.
@@ -17,5 +18,4 @@ main.o: main.c
 	${CC} ${CFLAGS} -c -o main.o main.c
 
 clean:
-	rm -f *.o
-	rm airspy_adsb
+	rm -f airspy_adsb *.o

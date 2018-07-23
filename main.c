@@ -2,18 +2,22 @@
  * airspy_adsb
  */
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <airspy.h>
 
 #define TAG "airspy_adsb"
 
-/* XXX take a posix mutex */
-volatile unsigned long sample_count;
-
+unsigned long sample_count;
+unsigned int last_count;
+unsigned char last_samples[16];
+static pthread_mutex_t rx_mutex;
+// static pthread_cond_t rx_cond;
 
 static void Usage(void) {
 	fprintf(stderr, "Usage: airspy_adsb\n");
@@ -21,7 +25,12 @@ static void Usage(void) {
 
 static int rx_callback(airspy_transfer_t *xfer)
 {
+	pthread_mutex_lock(&rx_mutex);
 	sample_count += xfer->sample_count;
+	// P3
+	last_count = xfer->sample_count;
+	memcpy(last_samples, xfer->samples, 16);
+	pthread_mutex_unlock(&rx_mutex);
 
 	// We are supposed to return -1 if the buffer was not processed, but
 	// we don't see how this can ever be useful. What is the library
@@ -36,6 +45,9 @@ int main(int argc, char **argv) {
 	uint32_t samplerates_count;
 	unsigned long n;
 	int i;
+
+	pthread_mutex_init(&rx_mutex, NULL);
+	// pthread_cond_init(&rx_cond, NULL);
 
 	if (argc != 1)
 		Usage();
@@ -83,8 +95,15 @@ int main(int argc, char **argv) {
 		goto err_rate;
 	}
 
-	// Optional: 1 - 12 bits, 0 - 16 bits
-	// rc = airspy_set_packing(device, 0);
+#if 1 /* This needs firmware v1.0.0-rc6 or later. */
+	// Packing: 1 - 12 bits, 0 - 16 bits
+	rc = airspy_set_packing(device, 1);
+	if (rc != AIRSPY_SUCCESS) {
+		fprintf(stderr, "airspy_set_packing() failed: %s (%d)\n",
+		    airspy_error_name(rc), rc);
+		goto err_packed;
+	}
+#endif
 
 	// Not sure why this is not optional
 	rc = airspy_set_rf_bias(device, 0);
@@ -96,16 +115,20 @@ int main(int argc, char **argv) {
 
 	// Apparently, all of the gain settings are optional, but we don't
 	// know what exacty happens if one omits them. Magic values, too.
-	rc = airspy_set_vga_gain(device, 5);
+
+	// default in airspy_rx is 5; rtl-sdr sets 11 (26.5 dB) FWIW.
+	rc = airspy_set_vga_gain(device, 10);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, "airspy_set_vga_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
+	// airspy_rx default is 5; rtl-sdr does... 0x10? but it's masked, so...
 	rc = airspy_set_mixer_gain(device, 5);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, "airspy_set_mixer_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
+	// airspy_rx default is 1
 	rc = airspy_set_lna_gain(device, 1);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, "airspy_set_lna_gain() failed: %s (%d)\n",
@@ -133,10 +156,19 @@ int main(int argc, char **argv) {
 	}
 
 	while (airspy_is_streaming(device)) {
+		unsigned char samples[16];
 		sleep(10);
+		pthread_mutex_lock(&rx_mutex);
 		n = sample_count;
 		sample_count = 0;
-		printf("%lu\n", n);
+		memcpy(samples, last_samples, 16);
+		pthread_mutex_unlock(&rx_mutex);
+		printf("samples %lu/10\n", n);
+		printf("last [%u]", last_count);
+		for (i = 0; i < 16; i++) {
+			printf(" %02x", samples[i]);
+		}
+		printf("\n");
 	}
 
 	airspy_stop_rx(device);
@@ -150,6 +182,7 @@ err_freq:
 	airspy_stop_rx(device);
 err_start:
 err_bias:
+err_packed:
 err_rate:
 	free(supported_samplerates);
 err_sample:
