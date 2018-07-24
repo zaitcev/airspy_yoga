@@ -1,5 +1,5 @@
 #
-# airspy_adsb
+# airspy_yoga
 #
 
 CFLAGS = -Wall
@@ -11,11 +11,11 @@ LDFLAGS = -lpthread
 CFLAGS += -I/usr/local/include/libairspy
 LIBS += -lairspy -L/usr/local/lib
 
-airspy_adsb: main.o
-	${CC} -o airspy_adsb main.o ${LIBS}
+airspy_yoga: main.o
+	${CC} -o airspy_yoga main.o ${LIBS}
 
 main.o: main.c
 	${CC} ${CFLAGS} -c -o main.o main.c
 
 clean:
-	rm -f airspy_adsb *.o
+	rm -f airspy_yoga *.o

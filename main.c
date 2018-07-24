@@ -1,5 +1,5 @@
 /*
- * airspy_adsb
+ * airspy_yoga
  */
 
 #include <pthread.h>
@@ -11,7 +11,7 @@
 
 #include <airspy.h>
 
-#define TAG "airspy_adsb"
+#define TAG "airspy_yoga"
 
 unsigned long sample_count;
 unsigned int last_count;
@@ -20,7 +20,7 @@ static pthread_mutex_t rx_mutex;
 // static pthread_cond_t rx_cond;
 
 static void Usage(void) {
-	fprintf(stderr, "Usage: airspy_adsb\n");
+	fprintf(stderr, "Usage: airspy_yoga\n");
 }
 
 static int rx_callback(airspy_transfer_t *xfer)
