@@ -41,8 +41,6 @@ static int rx_callback(airspy_transfer_t *xfer)
 int main(int argc, char **argv) {
 	int rc;
 	struct airspy_device *device = NULL;
-	uint32_t *supported_samplerates;
-	uint32_t samplerates_count;
 	unsigned long n;
 	int i;
 
@@ -74,6 +72,9 @@ int main(int argc, char **argv) {
 		goto err_sample;
 	}
 
+#if 0 /* We set to 20 million, index 0, which works on all firmware levels. */
+	uint32_t samplerates_count;
+	uint32_t *supported_samplerates;
 	airspy_get_samplerates(device, &samplerates_count, 0);
 	supported_samplerates = malloc(samplerates_count * sizeof(uint32_t));
 	airspy_get_samplerates(device,
@@ -85,8 +86,9 @@ int main(int argc, char **argv) {
 		printf(" %u", supported_samplerates[i]);
 	}
 	printf("\n");
-
-	// Setting by value fails with AIRSPY_ERROR_LIBUSB, on sameple code too
+	free(supported_samplerates);
+#endif
+	// Setting by value fails on firmware v1.0.0-rc4, so set by index.
 	// rc = airspy_set_samplerate(device, 20000000);
 	rc = airspy_set_samplerate(device, 0);
 	if (rc != AIRSPY_SUCCESS) {
@@ -113,11 +115,12 @@ int main(int argc, char **argv) {
 		goto err_bias;
 	}
 
-	// Apparently, all of the gain settings are optional, but we don't
-	// know what exacty happens if one omits them. Magic values, too.
-
+	// The gain values are those for r820t. No other amplifiers, it seems.
+	//
 	// default in airspy_rx is 5; rtl-sdr sets 11 (26.5 dB) FWIW.
-	rc = airspy_set_vga_gain(device, 10);
+	// rc = airspy_set_vga_gain(device, 10); // 0806 0807 0808 0805
+	// rc = airspy_set_vga_gain(device, 11); // 0807 0809 07ff 0807
+	rc = airspy_set_vga_gain(device, 12); // 080b 07fd 0803 0807
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, "airspy_set_vga_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
@@ -134,11 +137,9 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "airspy_set_lna_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
-
 	// These two are alternative to the direct gain settings
 	// rc = airspy_set_linearity_gain(device, linearity_gain_val);
 	// rc = airspy_set_sensitivity_gain(device, sensitivity_gain_val);
-
 
 	rc = airspy_start_rx(device, rx_callback, NULL);
 	if (rc != AIRSPY_SUCCESS) {
@@ -165,15 +166,14 @@ int main(int argc, char **argv) {
 		pthread_mutex_unlock(&rx_mutex);
 		printf("samples %lu/10\n", n);
 		printf("last [%u]", last_count);
-		for (i = 0; i < 16; i++) {
-			printf(" %02x", samples[i]);
+		for (i = 0; i < 16/2; i += 2) {
+			printf(" %04x", samples[i+1]<<8 | samples[i]);
 		}
 		printf("\n");
 	}
 
 	airspy_stop_rx(device);
 
-	free(supported_samplerates);
 	airspy_close(device);
 	airspy_exit();
 	return 0;
@@ -184,7 +184,6 @@ err_start:
 err_bias:
 err_packed:
 err_rate:
-	free(supported_samplerates);
 err_sample:
 	airspy_close(device);
 err_open:
