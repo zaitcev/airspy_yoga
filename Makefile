@@ -2,7 +2,7 @@
 # airspy_yoga
 #
 
-CFLAGS = -Wall
+CFLAGS = -Wall -O2
 LDFLAGS = -lpthread
 
 # The default location for pkg is /usr/lib64/pkgconfig and /usr/share/pkgconfig

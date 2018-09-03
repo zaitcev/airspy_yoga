@@ -16,20 +16,162 @@
 unsigned long sample_count;
 unsigned int last_count;
 unsigned char last_samples[16];
+unsigned int last_bias_a;
+long last_anal[3];
 static pthread_mutex_t rx_mutex;
 // static pthread_cond_t rx_cond;
+
+// PM is the number of bits in preamble, 8.
+// XXX implement "-1st" or "9th" silent bit, check if more packets come in
+#define M     8
+
+// Samples per bit is 10 (for 20 Ms/S).
+#define SPB  10
+
+// XXX
+#if 0
+struct track {
+	long sum;		// running sum
+};
+
+unsigned int tx;		// running index 0..M*SPB-1
+struct track tvec[M*SPB];
+#endif
+
+/*
+ * We're treating the offset by 0x800 as a part of the DC bias.
+ */
+#define BVLEN  (SPB*5)
+// #define BVLEN 64
+// Method A:
+static unsigned short bvec_a[BVLEN];
+static unsigned int bvx_a;
+static unsigned int dc_bias = 0x800;
+static unsigned int bias_timer;
+
+static const int pfun[M*SPB] = {
+	1, 1, 1, 1, 1, 0, 0, 0, 0, 0,	// 0
+	1, 1, 1, 1, 1, 0, 0, 0, 0, 0,	// 1
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 2
+	0, 0, 0, 0, 0, 1, 1, 1, 1, 1,	// 3
+	0, 0, 0, 0, 0, 1, 1, 1, 1, 1,	// 4
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 5
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 6
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0 	// 7
+};
 
 static void Usage(void) {
 	fprintf(stderr, "Usage: airspy_yoga\n");
 }
 
+static void dc_bias_update(unsigned char *sp)
+{
+	int i;
+	unsigned int sum;
+
+	sum = 0;
+	for (i = 0; i < BVLEN; i++) {
+		sum += ((unsigned int) sp[1])<<8 | sp[0];
+		sp += 2;
+	}
+	dc_bias = sum / BVLEN;
+}
+
+#if 0
+static unsigned int dc_bias_update_a(unsigned int sample)
+{
+	int i;
+	unsigned int sum;
+
+	bvec_a[bvx_a] = sample;
+	bvx_a = (bvx_a + 1) % BVLEN;
+	sum = 0;
+	for (i = 0; i < BVLEN; i++) {
+		sum += bvec_a[i];
+	}
+	dc_bias = sub / BVLEN;
+	return dc_bias;
+}
+#endif
+
+/*
+ * We aren't using the optimized method, because we only update the bias
+ * occasionally now, so the improvement is a wash.
+ */
+#if 0
+static unsigned short bvec_b[BVLEN];
+static unsigned int bvx_b;
+static unsigned int bcur;
+static unsigned int dc_bias_update_b(unsigned int sample)
+{
+	unsigned int bsub;
+
+	bsub = bvec_b[bvx_b];
+	bvec_b[bvx_b] = sample;
+	bvx_b = (bvx_b + 1) % BVLEN;
+
+	bcur -= bsub;	// overflows the unsigned, but it's all right
+	bcur += sample;
+	// if (bcur >= 0x1000)
+	// 	return 0x800;
+	return bcur / BVLEN;
+}
+#endif
+
 static int rx_callback(airspy_transfer_t *xfer)
 {
+	int i;
+	unsigned char *sp;
+	unsigned int sample;
+	// int value;
+	long anal[3];
+
+	if (bias_timer == 0) {
+		if (xfer->sample_count >= BVLEN) {
+			sp = xfer->samples;
+			dc_bias_update(sp);
+		}
+	}
+	bias_timer = (bias_timer + 1) % 10;
+
+	for (i = 0; i < 3; i++)
+		anal[i] = 0;
+
+	sp = xfer->samples;
+	for (i = 0; i < xfer->sample_count; i++) {
+
+		// You'll never believe it, but loading shorts like this
+		// is not at all faster than the portable way.
+		// #include <endian.h>
+		// unsigned short int sp;
+		// sample = le16toh(*sp);
+		sample = sp[1]<<8 | sp[0];
+
+		// Something is not right, let's analyze the data a bit.
+		if (sample == 0) {
+			anal[0]++;
+		} else if (sample >= 0x1000) {
+			anal[2]++;
+		} else {
+			anal[1]++;
+		}
+
+		// value = (int) (sample - dc_bias);
+
+		sp += 2;
+	}
+
 	pthread_mutex_lock(&rx_mutex);
 	sample_count += xfer->sample_count;
-	// P3
+
 	last_count = xfer->sample_count;
 	memcpy(last_samples, xfer->samples, 16);
+
+	last_bias_a = dc_bias;
+
+	for (i = 0; i < 3; i++)
+		last_anal[i] += anal[i];
+
 	pthread_mutex_unlock(&rx_mutex);
 
 	// We are supposed to return -1 if the buffer was not processed, but
@@ -164,7 +306,11 @@ int main(int argc, char **argv) {
 		sample_count = 0;
 		memcpy(samples, last_samples, 16);
 		pthread_mutex_unlock(&rx_mutex);
-		printf("samples %lu/10\n", n);
+		printf("samples %lu/10 bias %u\n", n, last_bias_a);
+		printf("anal zero %ld other %ld over %ld\n",
+		    last_anal[0], last_anal[1], last_anal[2]);
+		for (i = 0; i < 3; i++)
+			last_anal[i] = 0;
 		printf("last [%u]", last_count);
 		for (i = 0; i < 16/2; i += 2) {
 			printf(" %04x", samples[i+1]<<8 | samples[i]);
