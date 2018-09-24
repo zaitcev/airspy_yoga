@@ -18,6 +18,7 @@ unsigned int last_count;
 unsigned char last_samples[16];
 unsigned int last_bias_a;
 long last_anal[3];
+long last_dv_anal[5];
 static pthread_mutex_t rx_mutex;
 // static pthread_cond_t rx_cond;
 
@@ -28,15 +29,28 @@ static pthread_mutex_t rx_mutex;
 // Samples per bit is 20 (for 20 Ms/s of real samples).
 #define SPB  20
 
-// XXX are we still going to use the track structure? At what cadence?
-#if 0
-struct track {
-	long sum;		// running sum
+#define PWRLEN 8
+
+struct upd {
+	// Ouch. The lengths of averaging for power and average power are not
+	// the same. But... We don't want to bother with allocation of variable
+	// length structures for now. Maybe later XXX
+	// int vec[max(PWRLEN, M*2)];
+	int vec[M*2];
+	unsigned int x;
+	int cur;
 };
 
-unsigned int tx;		// running index 0..M*SPB-1
-struct track tvec[M*SPB];
-#endif
+struct track {
+	int t_p[M*2];
+	struct upd ap_u;
+};
+
+// N.B. see the comment below about NT needing to divide by M*2 (== SPB/2)
+// NT == 8*20 == 160, M*2 = 8*2 = 16, SPB/2 = 20/2 = 10
+#define NT  (M*SPB)	// XXX max resolution for now, will downsample later
+unsigned int tx;		// running index 0..NT-1
+struct track tvec[NT];
 
 /*
  * We're treating the offset by 0x800 as a part of the DC bias.
@@ -45,15 +59,15 @@ struct track tvec[M*SPB];
 #define BVLEN  (128)
 static unsigned int dc_bias = 0x800;
 
-static const int pfun[M*SPB] = {
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 0
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 1
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 2
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,	// 3
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,	// 4
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 5
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 6
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	// 7
+static const int pfun[M*2] = {
+	1, 0, 	// 0 ms
+	1, 0, 	// 1 ms
+	0, 0,	// 2 ms
+	0, 1,	// 3 ms
+	0, 1,	// 4 ms
+	0, 0,	// 5 ms
+	0, 0,	// 6 ms
+	0, 0	// 7 ms
 };
 
 static void Usage(void) {
@@ -102,7 +116,7 @@ static unsigned int dc_bias_update_a(unsigned int sample)
 static unsigned short bvec_b[BVLEN];
 static unsigned int bvx_b;
 static unsigned int bcur;
-static unsigned int dc_bias_update_b(unsigned int sample)
+static inline unsigned int dc_bias_update_b(unsigned int sample)
 {
 	unsigned int bsub;
 
@@ -118,13 +132,101 @@ static unsigned int dc_bias_update_b(unsigned int sample)
 }
 #endif
 
+static struct upd pwr_upd;
+static inline int pwr_update(struct upd *up, unsigned int len, int p)
+{
+	int sub;
+
+	sub = up->vec[up->x];
+	up->vec[up->x] = p;
+	up->x = (up->x + 1) % len;
+
+	up->cur -= sub;
+	up->cur += p;
+        if (up->cur < 0) {
+		// XXX impossible, report this
+		up->cur = 0;
+	}
+	// XXX you know, it cold be a division by constant if we did a macro
+	return up->cur / len;
+}
+
+// return: the discriminate value (smaller is better)
+static inline int preamble_match(int value)
+{
+	struct track *tp;
+	unsigned int tx1;
+	int p;
+	int avg_p;
+	int dv;
+	int i;
+
+	// Calculate tracking average power over the few recent real samples.
+	// The averaging distance must include a couple of periods. We're
+	// doing this because we don't have I/Q. We're hoping for IF of 5 MHz
+	// here, therefore at 20 Ms/s we need 8 samples. Probaby the more the
+	// better... But we don't want to run much past the size of one half
+	// of one bit, or our average power becomes useless to identify
+	// the pulses of the preamble. See the PWRLEN.
+	// XXX You know, finding the IF and doing "FS4" into I/Q
+	// may just be better than this garbage.
+	p = pwr_update(&pwr_upd, PWRLEN, value*value);
+
+	/*
+	 * Save the current power into every track that's relevant, at an
+	 * approprite position for its half-bit. Note that every track gets
+	 * an appropriate update, as long as NT is wholly divisible by M*2.
+	 */
+	tx1 = tx;
+	for (i = 0; i < M*2; i++) {
+		tp = &tvec[tx1];
+		tp->t_p[i] = p;
+		tx1 = (tx1 + NT - SPB/2) % NT;
+	}
+
+	/*
+	 * Now, let's compute the discriminate value. The only decent way
+	 * we found requires two passes though. First, we compute the average
+	 * power across half-bits (XXX this should be possibe to optimize
+	 * using the standard "update" thing). Then, we find the difference...
+	 * If we didn't screw up the averaging, this DV is always positive?
+	 * The factor of 4 is how much larger the '1' value is than the
+	 * average, when 1/4 of half-bits are '1' (4 out of 16, see pfun[]).
+	 */
+	tp = &tvec[tx];
+	avg_p = pwr_update(&tp->ap_u, M*2, p);
+	dv = 0;
+	for (i = 0; i < M*2; i++) {
+		dv += tp->t_p[i] - avg_p * 4 * pfun[i];
+	}
+
+	/*
+	 * Because of the intrinsic noise, stronger signals are going to have
+	 * greater DV, but the lower is better. So, we normalize the DV itself
+	 * too, but do it in a relative units that prevent underflow when
+	 * calculating in integers.
+	 */
+	if (avg_p != 0) {
+		dv = (dv * 10) / avg_p;
+	}
+
+	// NT is not a power of 2.
+	// tx = (tx + 1) % NT;			// with fast remainders
+	// tx = (tx == NT-1) ? 0 : tx+1;	// modern CPU with cmov
+	if (++tx == NT) tx = 0;			// with slow divisions
+
+	return dv;
+}
+
 static int rx_callback(airspy_transfer_t *xfer)
 {
 	int i;
 	unsigned char *sp;
 	unsigned int sample;
-	// int value;
+	int value;
+	int dv;
 	long anal[3];
+	long dv_anal[5];
 
 #if 0 /* Method Zero */
 	if (bias_timer == 0) {
@@ -136,8 +238,8 @@ static int rx_callback(airspy_transfer_t *xfer)
 	bias_timer = (bias_timer + 1) % 10;
 #endif
 
-	for (i = 0; i < 3; i++)
-		anal[i] = 0;
+	memset(anal, 0, sizeof(anal));
+	memset(dv_anal, 0, sizeof(dv_anal));
 
 	sp = xfer->samples;
 	for (i = 0; i < xfer->sample_count; i++) {
@@ -155,13 +257,26 @@ static int rx_callback(airspy_transfer_t *xfer)
 		// Something is not right, let's analyze the data a bit.
 		if (sample == 0) {
 			anal[0]++;
-		} else if (sample >= 0x1000) {
-			anal[2]++;
-		} else {
+		} else if (sample < 0x1000) {
 			anal[1]++;
+		} else {
+			anal[2]++;
 		}
 
-		// value = (int) (sample - dc_bias);
+		value = (int) sample - (int) dc_bias;
+		dv = preamble_match(value);
+
+		if (dv < -100) {
+			dv_anal[0]++;
+		} else if (dv < 0) {
+			dv_anal[1]++;
+		} else if (dv == 0) {
+			dv_anal[2]++;
+		} else if (dv < 100) {
+			dv_anal[3]++;
+		} else {
+			dv_anal[4]++;
+		}
 
 		sp += 2;
 	}
@@ -176,6 +291,8 @@ static int rx_callback(airspy_transfer_t *xfer)
 
 	for (i = 0; i < 3; i++)
 		last_anal[i] += anal[i];
+	for (i = 0; i < 5; i++)
+		last_dv_anal[i] += dv_anal[i];
 
 	pthread_mutex_unlock(&rx_mutex);
 
@@ -305,17 +422,25 @@ int main(int argc, char **argv) {
 
 	while (airspy_is_streaming(device)) {
 		unsigned char samples[16];
+
 		sleep(10);
+
 		pthread_mutex_lock(&rx_mutex);
 		n = sample_count;
 		sample_count = 0;
 		memcpy(samples, last_samples, 16);
 		pthread_mutex_unlock(&rx_mutex);
+
+		printf("\n");  // for visibility
 		printf("samples %lu/10 bias %u\n", n, last_bias_a);
-		printf("anal zero %ld other %ld over %ld\n",
+		printf("s. analysis: zero %ld inrange %ld over %ld\n",
 		    last_anal[0], last_anal[1], last_anal[2]);
-		for (i = 0; i < 3; i++)
-			last_anal[i] = 0;
+		printf("dv analysis: -100 %ld neg %ld zero %ld pos %ld +100 %ld\n",
+		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
+		    last_dv_anal[3], last_dv_anal[4]);
+		memset(last_anal, 0, sizeof(last_anal));
+		memset(last_dv_anal, 0, sizeof(last_dv_anal));
+
 		printf("last [%u]", last_count);
 		for (i = 0; i < 16; i += 2) {
 			printf(" %04x", samples[i+1]<<8 | samples[i]);
