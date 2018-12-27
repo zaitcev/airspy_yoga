@@ -43,9 +43,11 @@ struct track tvec[M*SPB];
  */
 #define BVLEN  (SPB*5)
 // #define BVLEN 64
+#if 0
 // Method A:
 static unsigned short bvec_a[BVLEN];
 static unsigned int bvx_a;
+#endif
 static unsigned int dc_bias = 0x800;
 static unsigned int bias_timer;
 
@@ -141,7 +143,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 	for (i = 0; i < xfer->sample_count; i++) {
 
 		// You'll never believe it, but loading shorts like this
-		// is not at all faster than the portable way.
+		// is not at all faster than the facilities of <endian.h>.
 		// #include <endian.h>
 		// unsigned short int sp;
 		// sample = le16toh(*sp);
@@ -312,7 +314,7 @@ int main(int argc, char **argv) {
 		for (i = 0; i < 3; i++)
 			last_anal[i] = 0;
 		printf("last [%u]", last_count);
-		for (i = 0; i < 16/2; i += 2) {
+		for (i = 0; i < 16; i += 2) {
 			printf(" %04x", samples[i+1]<<8 | samples[i]);
 		}
 		printf("\n");
