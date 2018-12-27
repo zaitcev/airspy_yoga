@@ -25,10 +25,10 @@ static pthread_mutex_t rx_mutex;
 // XXX implement "-1st" or "9th" silent bit, check if more packets come in
 #define M     8
 
-// Samples per bit is 10 (for 20 Ms/S).
-#define SPB  10
+// Samples per bit is 20 (for 20 Ms/s of real samples).
+#define SPB  20
 
-// XXX
+// XXX are we still going to use the track structure? At what cadence?
 #if 0
 struct track {
 	long sum;		// running sum
@@ -41,32 +41,29 @@ struct track tvec[M*SPB];
 /*
  * We're treating the offset by 0x800 as a part of the DC bias.
  */
-#define BVLEN  (SPB*5)
-// #define BVLEN 64
-#if 0
-// Method A:
-static unsigned short bvec_a[BVLEN];
-static unsigned int bvx_a;
-#endif
+// XXX experiment with various BVLEN. Divide by 128 is faster than 100, right?
+#define BVLEN  (128)
 static unsigned int dc_bias = 0x800;
-static unsigned int bias_timer;
 
 static const int pfun[M*SPB] = {
-	1, 1, 1, 1, 1, 0, 0, 0, 0, 0,	// 0
-	1, 1, 1, 1, 1, 0, 0, 0, 0, 0,	// 1
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 2
-	0, 0, 0, 0, 0, 1, 1, 1, 1, 1,	// 3
-	0, 0, 0, 0, 0, 1, 1, 1, 1, 1,	// 4
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 5
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 6
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0 	// 7
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 0
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 1
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 2
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,	// 3
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,	// 4
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 5
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,	// 6
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0	// 7
 };
 
 static void Usage(void) {
 	fprintf(stderr, "Usage: airspy_yoga\n");
 }
 
-static void dc_bias_update(unsigned char *sp)
+// Method Zero: direct calculation of the average
+#if 0
+static unsigned int bias_timer;
+static unsigned int dc_bias_update(unsigned char *sp)
 {
 	int i;
 	unsigned int sum;
@@ -76,10 +73,14 @@ static void dc_bias_update(unsigned char *sp)
 		sum += ((unsigned int) sp[1])<<8 | sp[0];
 		sp += 2;
 	}
-	dc_bias = sum / BVLEN;
+	return sum / BVLEN;
 }
+#endif
 
 #if 0
+// Method A:
+static unsigned short bvec_a[BVLEN];
+static unsigned int bvx_a;
 static unsigned int dc_bias_update_a(unsigned int sample)
 {
 	int i;
@@ -96,11 +97,8 @@ static unsigned int dc_bias_update_a(unsigned int sample)
 }
 #endif
 
-/*
- * We aren't using the optimized method, because we only update the bias
- * occasionally now, so the improvement is a wash.
- */
-#if 0
+#if 1
+// Method B: optimized with no loop
 static unsigned short bvec_b[BVLEN];
 static unsigned int bvx_b;
 static unsigned int bcur;
@@ -128,13 +126,15 @@ static int rx_callback(airspy_transfer_t *xfer)
 	// int value;
 	long anal[3];
 
+#if 0 /* Method Zero */
 	if (bias_timer == 0) {
 		if (xfer->sample_count >= BVLEN) {
 			sp = xfer->samples;
-			dc_bias_update(sp);
+			dc_bias = dc_bias_update(sp);
 		}
 	}
 	bias_timer = (bias_timer + 1) % 10;
+#endif
 
 	for (i = 0; i < 3; i++)
 		anal[i] = 0;
@@ -148,6 +148,9 @@ static int rx_callback(airspy_transfer_t *xfer)
 		// unsigned short int sp;
 		// sample = le16toh(*sp);
 		sample = sp[1]<<8 | sp[0];
+#if 1 /* Method B */
+		dc_bias = dc_bias_update_b(sample);
+#endif
 
 		// Something is not right, let's analyze the data a bit.
 		if (sample == 0) {
