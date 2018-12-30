@@ -13,6 +13,8 @@
 
 #define TAG "airspy_yoga"
 
+int mode_capture;
+
 unsigned long sample_count;
 unsigned int last_count;
 unsigned char last_samples[16];
@@ -20,7 +22,7 @@ unsigned int last_bias_a;
 long last_anal[3];
 long last_dv_anal[5];
 static pthread_mutex_t rx_mutex;
-// static pthread_cond_t rx_cond;
+static pthread_cond_t rx_cond;
 
 // PM is the number of bits in preamble, 8.
 // XXX implement "-1st" or "9th" silent bit, check if more packets come in
@@ -52,6 +54,16 @@ struct track {
 unsigned int tx;		// running index 0..NT-1
 struct track tvec[NT];
 
+struct cap1 {
+	int bias;
+	int pwr;
+	int off;		// in samples, not bytes
+	unsigned int len;	// in samples, not bytes
+	unsigned char buf[];
+};
+
+struct cap1 *pcap;
+
 /*
  * We're treating the offset by 0x800 as a part of the DC bias.
  */
@@ -71,7 +83,8 @@ static const int pfun[M*2] = {
 };
 
 static void Usage(void) {
-	fprintf(stderr, "Usage: airspy_yoga\n");
+	fprintf(stderr, "Usage: airspy_yoga [-c power_threshold]\n");
+	exit(1);
 }
 
 // Method Zero: direct calculation of the average
@@ -130,6 +143,13 @@ static inline unsigned int dc_bias_update_b(unsigned int sample)
 	// 	return 0x800;
 	return bcur / BVLEN;
 }
+static void dc_bias_init_b(void)
+{
+	int i;
+	for (i = 0; i < BVLEN; i++)
+		bvec_b[i] = dc_bias;
+	bcur = dc_bias * BVLEN;
+}
 #endif
 
 static struct upd pwr_upd;
@@ -143,8 +163,10 @@ static inline int pwr_update(struct upd *up, unsigned int len, int p)
 
 	up->cur -= sub;
 	up->cur += p;
-        if (up->cur < 0) {
+	if (up->cur < 0) {
 		// XXX impossible, report this
+		fprintf(stderr, TAG ": pwr_update error, p %d x %d\n",
+		    up->cur, up->x);
 		up->cur = 0;
 	}
 	// XXX you know, it cold be a division by constant if we did a macro
@@ -302,21 +324,105 @@ static int rx_callback(airspy_transfer_t *xfer)
 	return 0;
 }
 
+static int rx_callback_capture(airspy_transfer_t *xfer)
+{
+	int i;
+	unsigned char *sp;
+	unsigned int sample;
+	int value;
+	int p;
+
+	sp = xfer->samples;
+	for (i = 0; i < xfer->sample_count; i++) {
+
+		sample = sp[1]<<8 | sp[0];
+		dc_bias = dc_bias_update_b(sample);
+		value = (int) sample - (int) dc_bias;
+		p = pwr_update(&pwr_upd, PWRLEN, value*value);
+
+		if (p >= mode_capture) {
+			pthread_mutex_lock(&rx_mutex);
+			if (pcap == NULL) {
+				struct cap1 *pc;
+				unsigned int len;
+				unsigned int start;
+				if (i < 100) {
+					start = 0;
+					len = i + 200;
+				} else {
+					start = i - 100;
+					len = 300;
+				}
+				if (start + len >= xfer->sample_count) {
+					len = xfer->sample_count - start;
+				}
+				pc = malloc(sizeof(struct cap1) + len*2);
+				pc->pwr = p;
+				pc->bias = dc_bias;
+				pc->off = i - start;
+				pc->len = len;
+				memcpy(pc->buf, xfer->samples + start*2, len*2);
+				pcap = pc;
+				pthread_cond_broadcast(&rx_cond);
+			}
+			pthread_mutex_unlock(&rx_mutex);
+		}
+
+		sp += 2;
+	}
+
+	return 0;
+}
+
+static void parse(char **argv) {
+	char *arg;
+	long lv;
+
+	argv++;
+	while ((arg = *argv++) != NULL) {
+		if (arg[0] == '-') {
+			switch (arg[1]) {
+			case 'c':
+				if ((arg = *argv++) == NULL || *arg == '-') {
+					fprintf(stderr,
+					    TAG ": missing -c threshold\n");
+					Usage();
+				}
+				lv = strtol(arg, NULL, 10);
+				if (lv <= 0) {
+					fprintf(stderr,
+					    TAG ": invalid -c threshold\n");
+					Usage();
+				}
+				mode_capture = lv;
+				break;
+			default:
+				Usage();
+			}
+		} else {
+			Usage();
+		}
+	}
+}
+
 int main(int argc, char **argv) {
 	int rc;
 	struct airspy_device *device = NULL;
+	int (*rx_cb)(airspy_transfer_t *xfer);
 	unsigned long n;
 	int i;
 
 	pthread_mutex_init(&rx_mutex, NULL);
-	// pthread_cond_init(&rx_cond, NULL);
+	pthread_cond_init(&rx_cond, NULL);
+#if 1 /* Method B */
+	dc_bias_init_b();
+#endif
 
-	if (argc != 1)
-		Usage();
+	parse(argv);
 
 	rc = airspy_init();
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_init() failed: %s (%d)\n",
+		fprintf(stderr, TAG ": airspy_init() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_init;
 	}
@@ -324,14 +430,15 @@ int main(int argc, char **argv) {
 	// open any device, result by reference
 	rc = airspy_open(&device);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_open() failed: %s (%d)\n",
+		fprintf(stderr, TAG ": airspy_open() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_open;
 	}
 
 	rc = airspy_set_sample_type(device, AIRSPY_SAMPLE_RAW);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_sample_type() failed: %s (%d)\n",
+		fprintf(stderr,
+		    TAG ": airspy_set_sample_type() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_sample;
 	}
@@ -356,7 +463,8 @@ int main(int argc, char **argv) {
 	// rc = airspy_set_samplerate(device, 20000000);
 	rc = airspy_set_samplerate(device, 0);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_samplerate() failed: %s (%d)\n",
+		fprintf(stderr,
+		    TAG ": airspy_set_samplerate() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_rate;
 	}
@@ -365,7 +473,7 @@ int main(int argc, char **argv) {
 	// Packing: 1 - 12 bits, 0 - 16 bits
 	rc = airspy_set_packing(device, 0);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_packing() failed: %s (%d)\n",
+		fprintf(stderr, TAG ": airspy_set_packing() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_packed;
 	}
@@ -374,7 +482,7 @@ int main(int argc, char **argv) {
 	// Not sure why this is not optional
 	rc = airspy_set_rf_bias(device, 0);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_rf_bias() failed: %s (%d)\n",
+		fprintf(stderr, TAG ": airspy_set_rf_bias() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_bias;
 	}
@@ -386,28 +494,36 @@ int main(int argc, char **argv) {
 	// rc = airspy_set_vga_gain(device, 11); // 0807 0809 07ff 0807
 	rc = airspy_set_vga_gain(device, 12); // 080b 07fd 0803 0807
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_vga_gain() failed: %s (%d)\n",
+		fprintf(stderr,
+		    TAG ": airspy_set_vga_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
 	// airspy_rx default is 5; rtl-sdr does... 0x10? but it's masked, so...
 	rc = airspy_set_mixer_gain(device, 5);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_mixer_gain() failed: %s (%d)\n",
+		fprintf(stderr,
+		    TAG ": airspy_set_mixer_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
 	// airspy_rx default is 1
 	rc = airspy_set_lna_gain(device, 1);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_lna_gain() failed: %s (%d)\n",
+		fprintf(stderr,
+		    TAG ": airspy_set_lna_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
 	// These two are alternative to the direct gain settings
 	// rc = airspy_set_linearity_gain(device, linearity_gain_val);
 	// rc = airspy_set_sensitivity_gain(device, sensitivity_gain_val);
 
-	rc = airspy_start_rx(device, rx_callback, NULL);
+	if (mode_capture) {
+		rx_cb = rx_callback_capture;
+	} else {
+		rx_cb = rx_callback;
+	}
+	rc = airspy_start_rx(device, rx_cb, NULL);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_start_rx() failed: %s (%d)\n",
+		fprintf(stderr, TAG ": airspy_start_rx() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_start;
 	}
@@ -415,9 +531,56 @@ int main(int argc, char **argv) {
 	// No idea why the frequency is set after the start of the receiving
 	rc = airspy_set_freq(device, 1090*1000000);
 	if (rc != AIRSPY_SUCCESS) {
-		fprintf(stderr, "airspy_set_freq() failed: %s (%d)\n",
+		fprintf(stderr, TAG ": airspy_set_freq() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 		goto err_freq;
+	}
+
+	if (mode_capture) {
+		while (airspy_is_streaming(device)) {
+			FILE *fp = stdout;
+			struct cap1 *pc;
+			unsigned char *sp;
+			unsigned int sample;
+			int value;
+
+			pthread_mutex_lock(&rx_mutex);
+			pc = pcap;
+			pcap = NULL;
+			pthread_mutex_unlock(&rx_mutex);
+
+			if (pc != NULL) {
+				fprintf(fp, "bias %d power %d off %d len %d\n",
+				    pc->bias, pc->pwr, pc->off, pc->len);
+				sp = pc->buf;
+				for (i = 0; i < pc->len; i++) {
+					sample = sp[1]<<8 | sp[0];
+					value = (int) sample - (int) pc->bias;
+					printf(" %4d", value);
+					sp += 2;
+				}
+				printf("\n");
+				fflush(fp);
+				free(pc);
+			}
+
+			pthread_mutex_lock(&rx_mutex);
+			if (pcap == NULL) {
+				rc = pthread_cond_wait(&rx_cond, &rx_mutex);
+				if (rc != 0) {
+					pthread_mutex_unlock(&rx_mutex);
+					fprintf(stderr,
+					   TAG "pthread_cond_wait() failed:"
+					   " %d\n", rc);
+					exit(1);
+				}
+			}
+			pthread_mutex_unlock(&rx_mutex);
+		}
+		airspy_stop_rx(device);
+		airspy_close(device);
+		airspy_exit();
+		exit(0);
 	}
 
 	while (airspy_is_streaming(device)) {
@@ -432,20 +595,24 @@ int main(int argc, char **argv) {
 		pthread_mutex_unlock(&rx_mutex);
 
 		printf("\n");  // for visibility
-		printf("samples %lu/10 bias %u\n", n, last_bias_a);
+		printf("samples %lu/10 bias %u power %d\n", n, last_bias_a,
+		    pwr_upd.cur);
 		printf("s. analysis: zero %ld inrange %ld over %ld\n",
 		    last_anal[0], last_anal[1], last_anal[2]);
 		printf("dv analysis: -100 %ld neg %ld zero %ld pos %ld +100 %ld\n",
 		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
 		    last_dv_anal[3], last_dv_anal[4]);
+		pthread_mutex_lock(&rx_mutex);
 		memset(last_anal, 0, sizeof(last_anal));
 		memset(last_dv_anal, 0, sizeof(last_dv_anal));
+		pthread_mutex_unlock(&rx_mutex);
 
 		printf("last [%u]", last_count);
 		for (i = 0; i < 16; i += 2) {
 			printf(" %04x", samples[i+1]<<8 | samples[i]);
 		}
 		printf("\n");
+
 	}
 
 	airspy_stop_rx(device);
