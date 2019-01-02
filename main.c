@@ -37,6 +37,7 @@ static pthread_cond_t rx_cond;
 #define SPB  20
 
 #define PWRLEN 8
+#define AVGLEN 3
 
 struct upd {
 	// Ouch. The lengths of averaging for power and average power are not
@@ -350,7 +351,9 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		sample = sp[1]<<8 | sp[0];
 		dc_bias = dc_bias_update_b(sample);
 		value = (int) sample - (int) dc_bias;
-		p = pwr_update(&pwr_upd, PWRLEN, value*value);
+		// XXX very termporary - capture linear averages
+		// p = pwr_update(&pwr_upd, PWRLEN, value*value);
+		p = pwr_update(&pwr_upd, AVGLEN, abs(value));
 
 		capvv[capx] = value;
 		cappv[capx] = p;
