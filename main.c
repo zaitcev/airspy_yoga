@@ -13,7 +13,12 @@
 
 #define TAG "airspy_yoga"
 
-int mode_capture;
+struct param {
+	int mode_capture;
+	int lna_gain;
+};
+
+static struct param par;
 
 unsigned long sample_count;
 unsigned int last_count;
@@ -56,8 +61,6 @@ struct track tvec[NT];
 
 struct cap1 {
 	int bias;
-	int pwr;
-	int off;		// in samples, not bytes
 	unsigned int len;	// in samples, not bytes
 	unsigned char buf[];
 };
@@ -83,7 +86,8 @@ static const int pfun[M*2] = {
 };
 
 static void Usage(void) {
-	fprintf(stderr, "Usage: airspy_yoga [-c power_threshold]\n");
+	fprintf(stderr, "Usage: airspy_yoga [-c power_threshold]"
+            " [-ga lna_gain]\n");
 	exit(1);
 }
 
@@ -324,6 +328,14 @@ static int rx_callback(airspy_transfer_t *xfer)
 	return 0;
 }
 
+#define CAPLEN   300
+#define CAPBACK  100
+
+static int capvv[CAPLEN];
+static int cappv[CAPLEN];
+static int capx;
+static int cap_timer;
+
 static int rx_callback_capture(airspy_transfer_t *xfer)
 {
 	int i;
@@ -340,28 +352,26 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		value = (int) sample - (int) dc_bias;
 		p = pwr_update(&pwr_upd, PWRLEN, value*value);
 
-		if (p >= mode_capture) {
+		capvv[capx] = value;
+		cappv[capx] = p;
+		capx = (capx + 1) % CAPLEN;
+
+		if (p >= par.mode_capture) {
+			if (cap_timer == 0)
+				cap_timer = CAPLEN - CAPBACK;
+		}
+
+		if (cap_timer != 0 && --cap_timer == 0) {
 			pthread_mutex_lock(&rx_mutex);
 			if (pcap == NULL) {
 				struct cap1 *pc;
-				unsigned int len;
-				unsigned int start;
-				if (i < 100) {
-					start = 0;
-					len = i + 200;
-				} else {
-					start = i - 100;
-					len = 300;
-				}
-				if (start + len >= xfer->sample_count) {
-					len = xfer->sample_count - start;
-				}
-				pc = malloc(sizeof(struct cap1) + len*2);
-				pc->pwr = p;
+				unsigned int len = CAPLEN;
+				pc = malloc(sizeof(struct cap1) +
+				     2 * len*sizeof(int));
 				pc->bias = dc_bias;
-				pc->off = i - start;
 				pc->len = len;
-				memcpy(pc->buf, xfer->samples + start*2, len*2);
+				memcpy(pc->buf, capvv, len*sizeof(int));
+				memcpy(pc->buf + len*4, cappv, len*sizeof(int));
 				pcap = pc;
 				pthread_cond_broadcast(&rx_cond);
 			}
@@ -374,9 +384,12 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 	return 0;
 }
 
-static void parse(char **argv) {
+static void parse(struct param *p, char **argv) {
 	char *arg;
 	long lv;
+
+	memset(p, 0, sizeof(struct param));
+	p->lna_gain = 1;
 
 	argv++;
 	while ((arg = *argv++) != NULL) {
@@ -394,7 +407,23 @@ static void parse(char **argv) {
 					    TAG ": invalid -c threshold\n");
 					Usage();
 				}
-				mode_capture = lv;
+				p->mode_capture = lv;
+				break;
+			case 'g':
+				if (arg[2] == 'a') {
+					if ((arg = *argv++) == NULL || *arg == '-') {
+						fprintf(stderr, TAG ": missing -ga value\n");
+						Usage();
+					}
+					lv = strtol(arg, NULL, 10);
+					if (lv < 0 || lv >= 16) {
+						fprintf(stderr, TAG ": invalid -ga value\n");
+						Usage();
+					}
+					p->lna_gain = lv | 0x10;
+				} else {
+					Usage();
+				}
 				break;
 			default:
 				Usage();
@@ -418,7 +447,7 @@ int main(int argc, char **argv) {
 	dc_bias_init_b();
 #endif
 
-	parse(argv);
+	parse(&par, argv);
 
 	rc = airspy_init();
 	if (rc != AIRSPY_SUCCESS) {
@@ -487,26 +516,47 @@ int main(int argc, char **argv) {
 		goto err_bias;
 	}
 
-	// The gain values are those for r820t. No other amplifiers, it seems.
+	// VGA is "Variable Gain Amplifier": the exit amplifier after mixer
+	// and filter in R820T.
 	//
 	// default in airspy_rx is 5; rtl-sdr sets 11 (26.5 dB) FWIW.
-	// rc = airspy_set_vga_gain(device, 10); // 0806 0807 0808 0805
-	// rc = airspy_set_vga_gain(device, 11); // 0807 0809 07ff 0807
-	rc = airspy_set_vga_gain(device, 12); // 080b 07fd 0803 0807
+	// We experimented a little, and leave 12 for now.
+	//
+	// 0x80  unused
+	// 0x40  VGA power:     0 off, 1 on
+	// 0x20  unused
+	// 0x10  VGA mode:      0 gain control by VAGC pin,
+	//                      1 gain control by code in this register
+	// 0x0f  VGA gain code: 0x0 -12 dB, 0xf +40.5 dB
+	rc = airspy_set_vga_gain(device, 12);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_vga_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
-	// airspy_rx default is 5; rtl-sdr does... 0x10? but it's masked, so...
+
+	// airspy_rx default is 5; rtl-sdr does 0x10 to enable auto.
+	//
+	// 0x80  unused
+	// 0x40  Mixer power:   0 off, 1 on
+	// 0x20  Mixer current: 0 max current, 1 normal current
+	// 0x10  Mixer mode:    0 manual mode, 1 auto mode
+	// 0x0f  manual gain level
 	rc = airspy_set_mixer_gain(device, 5);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_mixer_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
+
 	// airspy_rx default is 1
-	rc = airspy_set_lna_gain(device, 1);
+	//
+	// 0x80  Loop through:  0 on, 1 off  -- weird, backwards
+	// 0x40  unused
+	// 0x20  LNA1 Power:    0 on, 1 off
+	// 0x10  Auto gain:     0 auto, 1 manual
+	// 0x0F  manual gain level
+	rc = airspy_set_lna_gain(device, par.lna_gain);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_lna_gain() failed: %s (%d)\n",
@@ -516,7 +566,7 @@ int main(int argc, char **argv) {
 	// rc = airspy_set_linearity_gain(device, linearity_gain_val);
 	// rc = airspy_set_sensitivity_gain(device, sensitivity_gain_val);
 
-	if (mode_capture) {
+	if (par.mode_capture) {
 		rx_cb = rx_callback_capture;
 	} else {
 		rx_cb = rx_callback;
@@ -536,13 +586,11 @@ int main(int argc, char **argv) {
 		goto err_freq;
 	}
 
-	if (mode_capture) {
+	if (par.mode_capture) {
 		while (airspy_is_streaming(device)) {
 			FILE *fp = stdout;
 			struct cap1 *pc;
-			unsigned char *sp;
-			unsigned int sample;
-			int value;
+			int *vp, *pp;
 
 			pthread_mutex_lock(&rx_mutex);
 			pc = pcap;
@@ -550,16 +598,13 @@ int main(int argc, char **argv) {
 			pthread_mutex_unlock(&rx_mutex);
 
 			if (pc != NULL) {
-				fprintf(fp, "bias %d power %d off %d len %d\n",
-				    pc->bias, pc->pwr, pc->off, pc->len);
-				sp = pc->buf;
+				fprintf(fp, "bias %d len %d\n",
+				    pc->bias, pc->len);
+				vp = (int *)pc->buf;
+				pp = (int *)pc->buf + pc->len;
 				for (i = 0; i < pc->len; i++) {
-					sample = sp[1]<<8 | sp[0];
-					value = (int) sample - (int) pc->bias;
-					printf(" %4d", value);
-					sp += 2;
+					printf(" %4d %6d\n", vp[i], pp[i]);
 				}
-				printf("\n");
 				fflush(fp);
 				free(pc);
 			}
