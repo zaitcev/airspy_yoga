@@ -157,8 +157,9 @@ static void dc_bias_init_b(void)
 }
 #endif
 
-static struct upd pwr_upd;
-static inline int pwr_update(struct upd *up, unsigned int len, int p)
+static struct upd x_upd;	// a smoother
+
+static inline int avg_update(struct upd *up, unsigned int len, int p)
 {
 	int sub;
 
@@ -170,12 +171,11 @@ static inline int pwr_update(struct upd *up, unsigned int len, int p)
 	up->cur += p;
 	if (up->cur < 0) {
 		// XXX impossible, report this
-		fprintf(stderr, TAG ": pwr_update error, p %d x %d\n",
+		fprintf(stderr, TAG ": avg_update error, p %d x %d\n",
 		    up->cur, up->x);
 		up->cur = 0;
 	}
-	// XXX you know, it cold be a division by constant if we did a macro
-	return up->cur / len;
+	return up->cur;
 }
 
 // return: the discriminate value (smaller is better)
@@ -197,7 +197,7 @@ static inline int preamble_match(int value)
 	// the pulses of the preamble. See the PWRLEN.
 	// XXX You know, finding the IF and doing "FS4" into I/Q
 	// may just be better than this garbage.
-	p = pwr_update(&pwr_upd, PWRLEN, value*value);
+	p = avg_update(&x_upd, PWRLEN, value*value) / PWRLEN;
 
 	/*
 	 * Save the current power into every track that's relevant, at an
@@ -211,17 +211,8 @@ static inline int preamble_match(int value)
 		tx1 = (tx1 + NT - SPB/2) % NT;
 	}
 
-	/*
-	 * Now, let's compute the discriminate value. The only decent way
-	 * we found requires two passes though. First, we compute the average
-	 * power across half-bits (XXX this should be possibe to optimize
-	 * using the standard "update" thing). Then, we find the difference...
-	 * If we didn't screw up the averaging, this DV is always positive?
-	 * The factor of 4 is how much larger the '1' value is than the
-	 * average, when 1/4 of half-bits are '1' (4 out of 16, see pfun[]).
-	 */
 	tp = &tvec[tx];
-	avg_p = pwr_update(&tp->ap_u, M*2, p);
+	avg_p = avg_update(&tp->ap_u, M*2, p) / M*2;
 	dv = 0;
 	for (i = 0; i < M*2; i++) {
 		dv += tp->t_p[i] - avg_p * 4 * pfun[i];
@@ -351,9 +342,7 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		sample = sp[1]<<8 | sp[0];
 		dc_bias = dc_bias_update_b(sample);
 		value = (int) sample - (int) dc_bias;
-		// XXX very termporary - capture linear averages
-		// p = pwr_update(&pwr_upd, PWRLEN, value*value);
-		p = pwr_update(&pwr_upd, AVGLEN, abs(value));
+		p = avg_update(&x_upd, AVGLEN, abs(value)) / AVGLEN;
 
 		capvv[capx] = value;
 		cappv[capx] = p;
@@ -644,7 +633,7 @@ int main(int argc, char **argv) {
 
 		printf("\n");  // for visibility
 		printf("samples %lu/10 bias %u power %d\n", n, last_bias_a,
-		    pwr_upd.cur);
+		    x_upd.cur);
 		printf("s. analysis: zero %ld inrange %ld over %ld\n",
 		    last_anal[0], last_anal[1], last_anal[2]);
 		printf("dv analysis: -100 %ld neg %ld zero %ld pos %ld +100 %ld\n",
