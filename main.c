@@ -22,9 +22,7 @@ static struct param par;
 
 unsigned long sample_count;
 unsigned int last_count;
-unsigned char last_samples[16];
 unsigned int last_bias_a;
-long last_anal[3];
 long last_dv_anal[5];
 static pthread_mutex_t rx_mutex;
 static pthread_cond_t rx_cond;
@@ -178,29 +176,24 @@ static inline int avg_update(struct upd *up, unsigned int len, int p)
 	return up->cur;
 }
 
-// return: the discriminate value (smaller is better)
+// return: the correlation
 static inline int preamble_match(int value)
 {
 	struct track *tp;
 	unsigned int tx1;
 	int p;
 	int avg_p;
-	int dv;
+	int cor;
 	int i;
 
-	// Calculate tracking average power over the few recent real samples.
-	// The averaging distance must include a couple of periods. We're
-	// doing this because we don't have I/Q. We're hoping for IF of 5 MHz
-	// here, therefore at 20 Ms/s we need 8 samples. Probaby the more the
-	// better... But we don't want to run much past the size of one half
-	// of one bit, or our average power becomes useless to identify
-	// the pulses of the preamble. See the PWRLEN.
-	// XXX You know, finding the IF and doing "FS4" into I/Q
-	// may just be better than this garbage.
-	p = avg_update(&x_upd, PWRLEN, value*value) / PWRLEN;
+	/*
+	 * Pass through a smoother and use abs() to make compatible with
+	 * the ideal function.
+	 */
+	p = avg_update(&x_upd, AVGLEN, abs(value)) / AVGLEN;
 
 	/*
-	 * Save the current power into every track that's relevant, at an
+	 * Save the current product into every track that's relevant, at an
 	 * approprite position for its half-bit. Note that every track gets
 	 * an appropriate update, as long as NT is wholly divisible by M*2.
 	 */
@@ -213,19 +206,21 @@ static inline int preamble_match(int value)
 
 	tp = &tvec[tx];
 	avg_p = avg_update(&tp->ap_u, M*2, p) / M*2;
-	dv = 0;
-	for (i = 0; i < M*2; i++) {
-		dv += tp->t_p[i] - avg_p * 4 * pfun[i];
-	}
 
 	/*
-	 * Because of the intrinsic noise, stronger signals are going to have
-	 * greater DV, but the lower is better. So, we normalize the DV itself
-	 * too, but do it in a relative units that prevent underflow when
-	 * calculating in integers.
+	 * Compute the correlator.
+	 *
+	 * Our ideal function is non-negative, with meaningful chunnks of
+	 * zeroes. If we just compute Sigma(signal(t)*ideal(t)), it's not going
+	 * to do us any good, because a constant signal is indistringuishable
+	 * of impulses then. To make correlator distinguish anything, we offset
+	 * everything by the average value.
 	 */
-	if (avg_p != 0) {
-		dv = (dv * 10) / avg_p;
+	cor = 0;
+	for (i = 0; i < M*2; i++) {
+		int norm_pfun = pfun[i] * avg_p * 4 - avg_p;
+		int norm_t_p = tp->t_p[i] - avg_p;
+		cor += norm_t_p * norm_pfun;
 	}
 
 	// NT is not a power of 2.
@@ -233,7 +228,7 @@ static inline int preamble_match(int value)
 	// tx = (tx == NT-1) ? 0 : tx+1;	// modern CPU with cmov
 	if (++tx == NT) tx = 0;			// with slow divisions
 
-	return dv;
+	return cor;
 }
 
 static int rx_callback(airspy_transfer_t *xfer)
@@ -242,8 +237,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 	unsigned char *sp;
 	unsigned int sample;
 	int value;
-	int dv;
-	long anal[3];
+	int dv;		// XXX not really DV anymore; hangs around until later
 	long dv_anal[5];
 
 #if 0 /* Method Zero */
@@ -256,7 +250,6 @@ static int rx_callback(airspy_transfer_t *xfer)
 	bias_timer = (bias_timer + 1) % 10;
 #endif
 
-	memset(anal, 0, sizeof(anal));
 	memset(dv_anal, 0, sizeof(dv_anal));
 
 	sp = xfer->samples;
@@ -271,19 +264,8 @@ static int rx_callback(airspy_transfer_t *xfer)
 #if 1 /* Method B */
 		dc_bias = dc_bias_update_b(sample);
 #endif
-
-		// Something is not right, let's analyze the data a bit.
-		if (sample == 0) {
-			anal[0]++;
-		} else if (sample < 0x1000) {
-			anal[1]++;
-		} else {
-			anal[2]++;
-		}
-
 		value = (int) sample - (int) dc_bias;
 		dv = preamble_match(value);
-
 		if (dv < -100) {
 			dv_anal[0]++;
 		} else if (dv < 0) {
@@ -301,17 +283,10 @@ static int rx_callback(airspy_transfer_t *xfer)
 
 	pthread_mutex_lock(&rx_mutex);
 	sample_count += xfer->sample_count;
-
 	last_count = xfer->sample_count;
-	memcpy(last_samples, xfer->samples, 16);
-
 	last_bias_a = dc_bias;
-
-	for (i = 0; i < 3; i++)
-		last_anal[i] += anal[i];
 	for (i = 0; i < 5; i++)
 		last_dv_anal[i] += dv_anal[i];
-
 	pthread_mutex_unlock(&rx_mutex);
 
 	// We are supposed to return -1 if the buffer was not processed, but
@@ -621,35 +596,26 @@ int main(int argc, char **argv) {
 	}
 
 	while (airspy_is_streaming(device)) {
-		unsigned char samples[16];
 
 		sleep(10);
 
 		pthread_mutex_lock(&rx_mutex);
 		n = sample_count;
 		sample_count = 0;
-		memcpy(samples, last_samples, 16);
 		pthread_mutex_unlock(&rx_mutex);
 
 		printf("\n");  // for visibility
 		printf("samples %lu/10 bias %u power %d\n", n, last_bias_a,
 		    x_upd.cur);
-		printf("s. analysis: zero %ld inrange %ld over %ld\n",
-		    last_anal[0], last_anal[1], last_anal[2]);
+
 		printf("dv analysis: -100 %ld neg %ld zero %ld pos %ld +100 %ld\n",
 		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
 		    last_dv_anal[3], last_dv_anal[4]);
 		pthread_mutex_lock(&rx_mutex);
-		memset(last_anal, 0, sizeof(last_anal));
 		memset(last_dv_anal, 0, sizeof(last_dv_anal));
 		pthread_mutex_unlock(&rx_mutex);
 
-		printf("last [%u]", last_count);
-		for (i = 0; i < 16; i += 2) {
-			printf(" %04x", samples[i+1]<<8 | samples[i]);
-		}
-		printf("\n");
-
+		printf("last [%u]\n", last_count);
 	}
 
 	airspy_stop_rx(device);
