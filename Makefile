@@ -11,11 +11,19 @@ LDFLAGS = -lpthread
 CFLAGS += -I/usr/local/include/libairspy
 LIBS += -lairspy -L/usr/local/lib
 
-airspy_yoga: main.o
-	${CC} -o airspy_yoga main.o ${LIBS}
+all: airspy_yoga testcor
 
-main.o: main.c
+airspy_yoga: main.o pre.o upd.o
+	${CC} -o airspy_yoga main.o pre.o upd.o ${LIBS}
+testcor: testcor.o  pre.o upd.o
+	${CC} -o test_cor testcor.o pre.o upd.o
+
+main.o: main.c yoga.h
 	${CC} ${CFLAGS} -c -o main.o main.c
+pre.o: pre.c yoga.h
+	${CC} ${CFLAGS} -c -o pre.o pre.c
+upd.o: upd.c yoga.h
+	${CC} ${CFLAGS} -c -o upd.o upd.c
 
 clean:
 	rm -f airspy_yoga *.o

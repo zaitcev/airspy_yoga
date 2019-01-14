@@ -11,6 +11,8 @@
 
 #include <airspy.h>
 
+#include "yoga.h"
+
 #define TAG "airspy_yoga"
 
 struct param {
@@ -20,43 +22,16 @@ struct param {
 
 static struct param par;
 
+static pthread_mutex_t rx_mutex;
+static pthread_cond_t rx_cond;
+
 unsigned long sample_count;
 unsigned int last_count;
 unsigned int last_bias_a;
 long last_dv_anal[5];
-static pthread_mutex_t rx_mutex;
-static pthread_cond_t rx_cond;
 
-// PM is the number of bits in preamble, 8.
-// XXX implement "-1st" or "9th" silent bit, check if more packets come in
-#define M     8
-
-// Samples per bit is 20 (for 20 Ms/s of real samples).
-#define SPB  20
-
-#define PWRLEN 8
-#define AVGLEN 3
-
-struct upd {
-	// Ouch. The lengths of averaging for power and average power are not
-	// the same. But... We don't want to bother with allocation of variable
-	// length structures for now. Maybe later XXX
-	// int vec[max(PWRLEN, M*2)];
-	int vec[M*2];
-	unsigned int x;
-	int cur;
-};
-
-struct track {
-	int t_p[M*2];
-	struct upd ap_u;
-};
-
-// N.B. see the comment below about NT needing to divide by M*2 (== SPB/2)
-// NT == 8*20 == 160, M*2 = 8*2 = 16, SPB/2 = 20/2 = 10
-#define NT  (M*SPB)	// XXX max resolution for now, will downsample later
-unsigned int tx;		// running index 0..NT-1
-struct track tvec[NT];
+/* Only accessed by the receiving thread, not locked. */
+static struct rstate rs;
 
 struct cap1 {
 	int bias;
@@ -72,17 +47,6 @@ struct cap1 *pcap;
 // XXX experiment with various BVLEN. Divide by 128 is faster than 100, right?
 #define BVLEN  (128)
 static unsigned int dc_bias = 0x800;
-
-static const int pfun[M*2] = {
-	1, 0, 	// 0 ms
-	1, 0, 	// 1 ms
-	0, 0,	// 2 ms
-	0, 1,	// 3 ms
-	0, 1,	// 4 ms
-	0, 0,	// 5 ms
-	0, 0,	// 6 ms
-	0, 0	// 7 ms
-};
 
 static void Usage(void) {
 	fprintf(stderr, "Usage: airspy_yoga [-c power_threshold]"
@@ -155,82 +119,6 @@ static void dc_bias_init_b(void)
 }
 #endif
 
-static struct upd x_upd;	// a smoother
-
-static inline int avg_update(struct upd *up, unsigned int len, int p)
-{
-	int sub;
-
-	sub = up->vec[up->x];
-	up->vec[up->x] = p;
-	up->x = (up->x + 1) % len;
-
-	up->cur -= sub;
-	up->cur += p;
-	if (up->cur < 0) {
-		// XXX impossible, report this
-		fprintf(stderr, TAG ": avg_update error, p %d x %d\n",
-		    up->cur, up->x);
-		up->cur = 0;
-	}
-	return up->cur;
-}
-
-// return: the correlation
-static inline int preamble_match(int value)
-{
-	struct track *tp;
-	unsigned int tx1;
-	int p;
-	int avg_p;
-	int cor;
-	int i;
-
-	/*
-	 * Pass through a smoother and use abs() to make compatible with
-	 * the ideal function.
-	 */
-	p = avg_update(&x_upd, AVGLEN, abs(value)) / AVGLEN;
-
-	/*
-	 * Save the current product into every track that's relevant, at an
-	 * approprite position for its half-bit. Note that every track gets
-	 * an appropriate update, as long as NT is wholly divisible by M*2.
-	 */
-	tx1 = tx;
-	for (i = 0; i < M*2; i++) {
-		tp = &tvec[tx1];
-		tp->t_p[i] = p;
-		tx1 = (tx1 + NT - SPB/2) % NT;
-	}
-
-	tp = &tvec[tx];
-	avg_p = avg_update(&tp->ap_u, M*2, p) / M*2;
-
-	/*
-	 * Compute the correlator.
-	 *
-	 * Our ideal function is non-negative, with meaningful chunnks of
-	 * zeroes. If we just compute Sigma(signal(t)*ideal(t)), it's not going
-	 * to do us any good, because a constant signal is indistringuishable
-	 * of impulses then. To make correlator distinguish anything, we offset
-	 * everything by the average value.
-	 */
-	cor = 0;
-	for (i = 0; i < M*2; i++) {
-		int norm_pfun = pfun[i] * avg_p * 4 - avg_p;
-		int norm_t_p = tp->t_p[i] - avg_p;
-		cor += norm_t_p * norm_pfun;
-	}
-
-	// NT is not a power of 2.
-	// tx = (tx + 1) % NT;			// with fast remainders
-	// tx = (tx == NT-1) ? 0 : tx+1;	// modern CPU with cmov
-	if (++tx == NT) tx = 0;			// with slow divisions
-
-	return cor;
-}
-
 static int rx_callback(airspy_transfer_t *xfer)
 {
 	int i;
@@ -265,7 +153,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 		dc_bias = dc_bias_update_b(sample);
 #endif
 		value = (int) sample - (int) dc_bias;
-		dv = preamble_match(value);
+		dv = preamble_match(&rs, value);
 		if (dv < -100) {
 			dv_anal[0]++;
 		} else if (dv < 0) {
@@ -317,7 +205,7 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		sample = sp[1]<<8 | sp[0];
 		dc_bias = dc_bias_update_b(sample);
 		value = (int) sample - (int) dc_bias;
-		p = avg_update(&x_upd, AVGLEN, abs(value)) / AVGLEN;
+		p = avg_update(&rs.smoo, AVGLEN, abs(value)) / AVGLEN;
 
 		capvv[capx] = value;
 		cappv[capx] = p;
@@ -605,8 +493,7 @@ int main(int argc, char **argv) {
 		pthread_mutex_unlock(&rx_mutex);
 
 		printf("\n");  // for visibility
-		printf("samples %lu/10 bias %u power %d\n", n, last_bias_a,
-		    x_upd.cur);
+		printf("samples %lu/10 bias %u\n", n, last_bias_a);
 
 		printf("dv analysis: -100 %ld neg %ld zero %ld pos %ld +100 %ld\n",
 		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
