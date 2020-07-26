@@ -29,6 +29,7 @@ int avg_update(struct upd *up, unsigned int len, int p);
 #if M*2 > MAXUPD
 #error "No space for M*2 in upd"
 #endif
+/* XXX Observe that t_p and ap_u.vec 100% duplicate each other. */
 struct track {
 	int t_p[M*2];
 	struct upd ap_u;

@@ -125,7 +125,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 	unsigned char *sp;
 	unsigned int sample;
 	int value;
-	int dv;		// XXX not really DV anymore; hangs around until later
+	int dv;		// "discriminant value" - just a random name
 	long dv_anal[5];
 
 #if 0 /* Method Zero */
@@ -154,13 +154,18 @@ static int rx_callback(airspy_transfer_t *xfer)
 #endif
 		value = (int) sample - (int) dc_bias;
 		dv = preamble_match(&rs, value);
-		if (dv < -100) {
+		/*
+		 * Bad matches seem to be around 7000..10000 and above.
+		 * Good must be 2000 and lower, then.
+		 * But zero is an error.
+		 */
+		if (dv < 0) {
 			dv_anal[0]++;
-		} else if (dv < 0) {
-			dv_anal[1]++;
 		} else if (dv == 0) {
+			dv_anal[1]++;
+		} else if (dv < 2900) {
 			dv_anal[2]++;
-		} else if (dv < 100) {
+		} else if (dv < 5000) {
 			dv_anal[3]++;
 		} else {
 			dv_anal[4]++;
@@ -495,7 +500,7 @@ int main(int argc, char **argv) {
 		printf("\n");  // for visibility
 		printf("samples %lu/10 bias %u\n", n, last_bias_a);
 
-		printf("dv analysis: -100 %ld neg %ld zero %ld pos %ld +100 %ld\n",
+		printf("dv analysis: <0 %ld zero %ld <2900 %ld <5000 %ld other %ld\n",
 		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
 		    last_dv_anal[3], last_dv_anal[4]);
 		pthread_mutex_lock(&rx_mutex);
