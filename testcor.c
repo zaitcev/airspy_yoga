@@ -57,6 +57,8 @@ int main(int argc, char **argv) {
 			continue;
 		}
 		cv = preamble_match(&rs, value);
+		if (cv == -1)
+			continue;
 		printf("%d\n", cv);
 	}
 

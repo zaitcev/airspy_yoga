@@ -3,7 +3,7 @@
  * A dumping ground of global definitions
  */
 
-#define MAXUPD 16
+#define MAXUPD 32
 
 struct upd {
 	int cur;
@@ -20,32 +20,37 @@ int avg_update(struct upd *up, unsigned int len, int p);
 // Samples per bit is 20 (for 20 Ms/s of real samples).
 #define SPB  20
 
-#define AVGLEN 3
+// Decimation factor is 5. It's explicit for a band correlator.
+#define DF    5
+
+// APP is the number of averaged samples in the preamble.
+#define APP  ((SPB/DF)*M)
+
+// XXX experiment with both
+// #define AVGLEN 3
+#define AVGLEN 5
 
 #if AVGLEN > MAXUPD
 #error "No space for AVGLEN in upd"
 #endif
 
-#if M*2 > MAXUPD
+#if APP > MAXUPD
 #error "No space for M*2 in upd"
 #endif
 /* XXX Observe that t_p and ap_u.vec 100% duplicate each other. */
 struct track {
-	int t_p[M*2];
+	int tx;
+	int t_p[APP];
 	struct upd ap_u;
 };
-
-// N.B. see the comment below about NT needing to divide by M*2 (== SPB/2)
-// NT == 8*20 == 160, M*2 = 8*2 = 16, SPB/2 = 20/2 = 10
-#define NT  (M*SPB)	// XXX max resolution for now, will downsample later
 
 /*
  * The receiver state: the bank of tracks, the smoother, etc.
  */
 struct rstate {
 	struct upd smoo;	// a smoother
-	unsigned int tx;	// running index 0..NT-1
-	struct track tvec[NT];
+	struct track trk;	// only 1 track in the band correlator
+	int dec;
 };
 
 int preamble_match(struct rstate *rsp, int value);

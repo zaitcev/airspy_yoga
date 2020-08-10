@@ -154,21 +154,14 @@ static int rx_callback(airspy_transfer_t *xfer)
 #endif
 		value = (int) sample - (int) dc_bias;
 		dv = preamble_match(&rs, value);
-		/*
-		 * Bad matches seem to be around 7000..10000 and above.
-		 * Good must be 2000 and lower, then.
-		 * But zero is an error.
-		 */
 		if (dv < 0) {
 			dv_anal[0]++;
 		} else if (dv == 0) {
 			dv_anal[1]++;
-		} else if (dv < 2900) {
+		} else if (dv == 1) {
 			dv_anal[2]++;
-		} else if (dv < 5000) {
-			dv_anal[3]++;
 		} else {
-			dv_anal[4]++;
+			dv_anal[3]++;
 		}
 
 		sp += 2;
@@ -500,9 +493,9 @@ int main(int argc, char **argv) {
 		printf("\n");  // for visibility
 		printf("samples %lu/10 bias %u\n", n, last_bias_a);
 
-		printf("dv analysis: <0 %ld zero %ld <2900 %ld <5000 %ld other %ld\n",
+		printf("dv analysis: skip %ld bad %ld good %ld error %ld\n",
 		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
-		    last_dv_anal[3], last_dv_anal[4]);
+		    last_dv_anal[3]);
 		pthread_mutex_lock(&rx_mutex);
 		memset(last_dv_anal, 0, sizeof(last_dv_anal));
 		pthread_mutex_unlock(&rx_mutex);
