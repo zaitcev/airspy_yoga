@@ -44,12 +44,11 @@ struct cap1 *pcap;
 /*
  * We're treating the offset by 0x800 as a part of the DC bias.
  */
-// XXX experiment with various BVLEN. Divide by 128 is faster than 100, right?
 #define BVLEN  (128)
 static unsigned int dc_bias = 0x800;
 
 static void Usage(void) {
-	fprintf(stderr, "Usage: airspy_yoga [-c power_threshold]"
+	fprintf(stderr, "Usage: airspy_yoga [-c pre|NNNN]"
             " [-ga lna_gain]\n");
 	exit(1);
 }
@@ -91,7 +90,6 @@ static unsigned int dc_bias_update_a(unsigned int sample)
 }
 #endif
 
-#if 1
 // Method B: optimized with no loop
 static unsigned short bvec_b[BVLEN];
 static unsigned int bvx_b;
@@ -117,7 +115,6 @@ static void dc_bias_init_b(void)
 		bvec_b[i] = dc_bias;
 	bcur = dc_bias * BVLEN;
 }
-#endif
 
 static int rx_callback(airspy_transfer_t *xfer)
 {
@@ -149,9 +146,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 		// unsigned short int sp;
 		// sample = le16toh(*sp);
 		sample = sp[1]<<8 | sp[0];
-#if 1 /* Method B */
 		dc_bias = dc_bias_update_b(sample);
-#endif
 		value = (int) sample - (int) dc_bias;
 		dv = preamble_match(&rs, value);
 		if (dv < 0) {
@@ -181,13 +176,49 @@ static int rx_callback(airspy_transfer_t *xfer)
 	return 0;
 }
 
-#define CAPLEN   300
-#define CAPBACK  100
+/*
+ * The trigger by signal level trips at a start of the interesting capture,
+ * whereas the trigger by preamble detection is trips at its end. So, we
+ * basically capture all history for "-c pre".
+ */
+#define CAPLEN     300
+#define CAPBACK_L  100
+#define CAPBACK_P  240
 
 static int capvv[CAPLEN];
 static int cappv[CAPLEN];
 static int capx;
 static int cap_timer;
+
+static struct cap1 *rx_get_capture(void)
+{
+	struct cap1 *pc;
+	unsigned int len = CAPLEN;
+	unsigned int *pv, *pp;
+
+	pc = malloc(sizeof(struct cap1) + 2 * len*sizeof(int));
+	if (!pc)
+		return NULL;
+
+	pc->bias = dc_bias;
+	pc->len = len;
+
+	/* Buffer is used in full. We do this only to catch calculation bugs. */
+	memset(pc->buf, 0, 2 * CAPLEN*sizeof(int));
+
+	pv = (unsigned int*) pc->buf;
+	pp = pv + CAPLEN;
+
+	memcpy(pv, capvv+capx, (CAPLEN-capx)*sizeof(int));
+	memcpy(pp, cappv+capx, (CAPLEN-capx)*sizeof(int));
+	pv += (CAPLEN-capx);
+	pp += (CAPLEN-capx);
+	if (capx != 0) {
+		memcpy(pv, capvv, capx*sizeof(int));
+		memcpy(pp, cappv, capx*sizeof(int));
+	}
+	return pc;
+}
 
 static int rx_callback_capture(airspy_transfer_t *xfer)
 {
@@ -203,29 +234,38 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		sample = sp[1]<<8 | sp[0];
 		dc_bias = dc_bias_update_b(sample);
 		value = (int) sample - (int) dc_bias;
-		p = avg_update(&rs.smoo, AVGLEN, abs(value)) / AVGLEN;
 
-		capvv[capx] = value;
-		cappv[capx] = p;
-		capx = (capx + 1) % CAPLEN;
+		if (par.mode_capture == -1) {
 
-		if (p >= par.mode_capture) {
-			if (cap_timer == 0)
-				cap_timer = CAPLEN - CAPBACK;
+			p = preamble_match(&rs, value);
+
+			capvv[capx] = value;
+			cappv[capx] = p;
+			capx = (capx + 1) % CAPLEN;
+
+			if (p == 1) {
+				if (cap_timer == 0)
+					cap_timer = CAPLEN - CAPBACK_P;
+			}
+
+		} else if (par.mode_capture != 0) {
+
+			p = avg_update(&rs.smoo, AVGLEN, abs(value)) / AVGLEN;
+
+			capvv[capx] = value;
+			cappv[capx] = p;
+			capx = (capx + 1) % CAPLEN;
+
+			if (p >= par.mode_capture) {
+				if (cap_timer == 0)
+					cap_timer = CAPLEN - CAPBACK_L;
+			}
 		}
 
 		if (cap_timer != 0 && --cap_timer == 0) {
 			pthread_mutex_lock(&rx_mutex);
 			if (pcap == NULL) {
-				struct cap1 *pc;
-				unsigned int len = CAPLEN;
-				pc = malloc(sizeof(struct cap1) +
-				     2 * len*sizeof(int));
-				pc->bias = dc_bias;
-				pc->len = len;
-				memcpy(pc->buf, capvv, len*sizeof(int));
-				memcpy(pc->buf + len*4, cappv, len*sizeof(int));
-				pcap = pc;
+				pcap = rx_get_capture();
 				pthread_cond_broadcast(&rx_cond);
 			}
 			pthread_mutex_unlock(&rx_mutex);
@@ -254,13 +294,17 @@ static void parse(struct param *p, char **argv) {
 					    TAG ": missing -c threshold\n");
 					Usage();
 				}
-				lv = strtol(arg, NULL, 10);
-				if (lv <= 0) {
-					fprintf(stderr,
-					    TAG ": invalid -c threshold\n");
-					Usage();
+				if (strcmp(arg, "pre") == 0) {
+					p->mode_capture = -1;
+				} else {
+					lv = strtol(arg, NULL, 10);
+					if (lv <= 0) {
+						fprintf(stderr, TAG
+						    ": invalid -c threshold\n");
+						Usage();
+					}
+					p->mode_capture = lv;
 				}
-				p->mode_capture = lv;
 				break;
 			case 'g':
 				if (arg[2] == 'a') {
@@ -296,9 +340,7 @@ int main(int argc, char **argv) {
 
 	pthread_mutex_init(&rx_mutex, NULL);
 	pthread_cond_init(&rx_cond, NULL);
-#if 1 /* Method B */
 	dc_bias_init_b();
-#endif
 
 	parse(&par, argv);
 
@@ -451,12 +493,12 @@ int main(int argc, char **argv) {
 			pthread_mutex_unlock(&rx_mutex);
 
 			if (pc != NULL) {
-				fprintf(fp, "bias %d len %d\n",
+				fprintf(fp, "# bias %d len %d\n",
 				    pc->bias, pc->len);
 				vp = (int *)pc->buf;
 				pp = (int *)pc->buf + pc->len;
 				for (i = 0; i < pc->len; i++) {
-					printf(" %4d %6d\n", vp[i], pp[i]);
+					fprintf(fp, " %4d %6d\n", vp[i], pp[i]);
 				}
 				fflush(fp);
 				free(pc);
