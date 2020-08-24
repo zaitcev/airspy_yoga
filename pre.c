@@ -30,8 +30,8 @@ static const int pfun[APP] = {
 int preamble_match(struct rstate *rs, int value)
 {
 	struct track *tp;
-	int p, avg_p, thr_0, thr_1;
-	int cor, step;
+	int p, sub, avg_p, thr_0, thr_1;
+	int /* bool */ cor, step;
 	int i, n;
 #if DEBUG
 	int v[APP], r[APP];
@@ -51,15 +51,17 @@ int preamble_match(struct rstate *rs, int value)
 		return -1;
 	rs->dec = 0;
 
-	tp = &rs->tvec[rs->tx];
-	rs->tx = (rs->tx + 1) % NT;
-
 #if DEBUG
 	tx_saved = rs->tx;
 #endif
+	tp = &rs->tvec[rs->tx];
+	rs->tx = (rs->tx + 1) % NT;
+
+	sub = tp->t_p[tp->t_x];
 	tp->t_p[tp->t_x] = p;
 	tp->t_x = (tp->t_x + 1) % APP;
-	avg_p = avg_update(&tp->ap_u, APP, p) / APP;
+	AVG_UPD_P(&tp->ap_u, sub, p);
+	avg_p = tp->ap_u / APP;
 
 	/*
 	 * Compute the correlator.
@@ -101,7 +103,7 @@ int preamble_match(struct rstate *rs, int value)
 	}
 
 #if DEBUG
-	printf("avg %d dead [%d:%d) tx %d", avg_p, thr_0, thr_1, tx_saved);
+	printf("avg %d band [%d:%d) tx %d", avg_p, thr_0, thr_1, tx_saved);
 	for (i = 0; i < APP; i++) {
 		printf(" %4d:%d", v[i], r[i]);
 	}
