@@ -3,7 +3,9 @@
 #
 
 CFLAGS = -Wall -O2
-LDFLAGS = -lpthread
+LDFLAGS =
+#CFLAGS = -Wall -g -pg
+#LDFLAGS = -pg
 
 # The default location for pkg is /usr/lib64/pkgconfig and /usr/share/pkgconfig
 # but the airspy's cmak-ed stuff ends in /usr/local/lib/pkgconfig. So whatever.
@@ -14,7 +16,7 @@ LIBS += -lairspy -L/usr/local/lib
 all: airspy_yoga test_cor
 
 airspy_yoga: main.o pre.o upd.o
-	${CC} -o airspy_yoga main.o pre.o upd.o ${LIBS}
+	${CC} ${LDFLAGS} -o airspy_yoga main.o pre.o upd.o ${LIBS}
 test_cor: testcor.o  pre.o upd.o
 	${CC} -o test_cor testcor.o pre.o upd.o
 

@@ -70,26 +70,6 @@ static unsigned int dc_bias_update(unsigned char *sp)
 }
 #endif
 
-#if 0
-// Method A:
-static unsigned short bvec_a[BVLEN];
-static unsigned int bvx_a;
-static unsigned int dc_bias_update_a(unsigned int sample)
-{
-	int i;
-	unsigned int sum;
-
-	bvec_a[bvx_a] = sample;
-	bvx_a = (bvx_a + 1) % BVLEN;
-	sum = 0;
-	for (i = 0; i < BVLEN; i++) {
-		sum += bvec_a[i];
-	}
-	dc_bias = sub / BVLEN;
-	return dc_bias;
-}
-#endif
-
 // Method B: optimized with no loop
 static unsigned short bvec_b[BVLEN];
 static unsigned int bvx_b;

@@ -8,10 +8,12 @@
 int avg_update(struct upd *up, unsigned int len, int p)
 {
 	int sub;
+	unsigned int x;
 
-	sub = up->vec[up->x];
-	up->vec[up->x] = p;
-	up->x = (up->x + 1) % len;
+	x = up->x;
+	sub = up->vec[x];
+	up->vec[x] = p;
+	up->x = (x + 1) % len;
 
 	up->cur -= sub;
 	up->cur += p;

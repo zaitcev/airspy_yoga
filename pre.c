@@ -31,7 +31,7 @@ int preamble_match(struct rstate *rs, int value)
 {
 	struct track *tp;
 	int p, avg_p, thr_0, thr_1;
-	int cor;
+	int cor, step;
 	int i, n;
 #if DEBUG
 	int v[APP], r[APP];
@@ -88,26 +88,14 @@ int preamble_match(struct rstate *rs, int value)
 #endif
 
 		if (pfun[i]) {
-#if DEBUG
-			r[i] = 1;
-#endif
-			if (p < thr_1) {
-#if DEBUG
-				r[i] = 0;
-#endif
-				cor = 0;
-			}
+			step = (p >= thr_1);
 		} else {
-#if DEBUG
-			r[i] = 1;
-#endif
-			if (p >= thr_0) {
-#if DEBUG
-				r[i] = 0;
-#endif
-				cor = 0;
-			}
+			step = (p < thr_0);
 		}
+#if DEBUG
+		r[i] = step;
+#endif
+		cor &= step;
 
 		n = (n + 1) % APP;
 	}
