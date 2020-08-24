@@ -23,12 +23,14 @@ int avg_update(struct upd *up, unsigned int len, int p);
 // Decimation factor is 5. It's explicit for a band correlator.
 #define DF    5
 
-// APP is the number of averaged samples in the preamble.
-#define APP  ((SPB/DF)*M)
+// APP is the number of averaged samples in the preamble - 2 samples per 1 bit.
+#define APP  (M*2)
 
-// XXX experiment with both
-// #define AVGLEN 3
-#define AVGLEN 5
+// Number of tracks is only 2, basically one lucky and one unlucky.
+#define NT    2
+
+// Yes, averaging length is larger than DF. Could be up to 10 (the half-bit).
+#define AVGLEN 7
 
 #if AVGLEN > MAXUPD
 #error "No space for AVGLEN in upd"
@@ -39,7 +41,7 @@ int avg_update(struct upd *up, unsigned int len, int p);
 #endif
 /* XXX Observe that t_p and ap_u.vec 100% duplicate each other. */
 struct track {
-	int tx;
+	int t_x;
 	int t_p[APP];
 	struct upd ap_u;
 };
@@ -48,9 +50,10 @@ struct track {
  * The receiver state: the bank of tracks, the smoother, etc.
  */
 struct rstate {
-	struct upd smoo;	// a smoother
-	struct track trk;	// only 1 track in the band correlator
+	struct upd smoo;	// a smoother for half-bits
 	int dec;
+	unsigned int tx;	// running index 0..NT-1
+	struct track tvec[NT];
 };
 
 int preamble_match(struct rstate *rsp, int value);

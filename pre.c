@@ -15,14 +15,14 @@
 #include "yoga.h"
 
 static const int pfun[APP] = {
-	1, 1, 0, 0, 	// 0 ms
-	1, 1, 0, 0, 	// 1 ms
-	0, 0, 0, 0,	// 2 ms
-	0, 0, 1, 1,	// 3 ms
-	0, 0, 1, 1,	// 4 ms
-	0, 0, 0, 0,	// 5 ms
-	0, 0, 0, 0,	// 6 ms
-	0, 0, 0, 0	// 7 ms
+	1, 0, 	// 0 ms
+	1, 0, 	// 1 ms
+	0, 0,	// 2 ms
+	0, 1,	// 3 ms
+	0, 1,	// 4 ms
+	0, 0,	// 5 ms
+	0, 0,	// 6 ms
+	0, 0	// 7 ms
 };
 
 // value: the sample value with DC bias already subtracted
@@ -35,6 +35,7 @@ int preamble_match(struct rstate *rs, int value)
 	int i, n;
 #if DEBUG
 	int v[APP], r[APP];
+	int tx_saved;
 
 	memset(v, 0, APP*sizeof(int));
 	memset(r, 0, APP*sizeof(int));
@@ -50,9 +51,14 @@ int preamble_match(struct rstate *rs, int value)
 		return -1;
 	rs->dec = 0;
 
-	tp = &rs->trk;
-	tp->t_p[tp->tx] = p;
-	tp->tx = (tp->tx + 1) % APP;
+	tp = &rs->tvec[rs->tx];
+	rs->tx = (rs->tx + 1) % NT;
+
+#if DEBUG
+	tx_saved = rs->tx;
+#endif
+	tp->t_p[tp->t_x] = p;
+	tp->t_x = (tp->t_x + 1) % APP;
 	avg_p = avg_update(&tp->ap_u, APP, p) / APP;
 
 	/*
@@ -74,7 +80,7 @@ int preamble_match(struct rstate *rs, int value)
 	thr_1 = (avg_p*10)/5;	// 50%
 
 	cor = 1;
-	n = tp->tx;
+	n = tp->t_x;
 	for (i = 0; i < APP; i++) {
 		p = tp->t_p[n];
 #if DEBUG
@@ -107,7 +113,7 @@ int preamble_match(struct rstate *rs, int value)
 	}
 
 #if DEBUG
-	printf("avg %d dead [%d:%d) ", avg_p, thr_0, thr_1);
+	printf("avg %d dead [%d:%d) tx %d", avg_p, thr_0, thr_1, tx_saved);
 	for (i = 0; i < APP; i++) {
 		printf(" %4d:%d", v[i], r[i]);
 	}

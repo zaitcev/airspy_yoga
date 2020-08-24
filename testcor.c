@@ -14,7 +14,7 @@
 static struct rstate rs;
 
 static void Usage(void) {
-	fprintf(stderr, "Usage: test_cor datafile\n");
+	fprintf(stderr, "Usage: test_cor [datafile]\n");
 	exit(1);
 }
 
@@ -25,22 +25,25 @@ int main(int argc, char **argv) {
 	long value;
 	int cv;
 
-	if (argc != 2) {
-		Usage();
-	}
-	input_name = argv[1];
-	if (input_name[0] == '-') {
-		if (input_name[1] != 0) {
-			Usage();
-		}
+	if (argc == 1) {
 		ifp = stdin;
-	} else {
-		ifp = fopen(input_name, "r");
-		if (ifp == NULL) {
-			fprintf(stderr, TAG ": Cannot open %s: %s\n",
-			    input_name, strerror(errno));
-			exit(1);
+	} else if (argc == 2) {
+		input_name = argv[1];
+		if (input_name[0] == '-') {
+			if (input_name[1] != 0) {
+				Usage();
+			}
+			ifp = stdin;
+		} else {
+			ifp = fopen(input_name, "r");
+			if (ifp == NULL) {
+				fprintf(stderr, TAG ": Cannot open %s: %s\n",
+				    input_name, strerror(errno));
+				exit(1);
+			}
 		}
+	} else {
+		Usage();
 	}
 
 	while (fgets(line, 80, ifp) != NULL) {
