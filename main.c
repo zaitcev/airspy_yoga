@@ -54,7 +54,7 @@ static void Usage(void) {
 }
 
 // Method Zero: direct calculation of the average
-#if 0
+#if 1
 static unsigned int bias_timer;
 static unsigned int dc_bias_update(unsigned char *sp)
 {
@@ -71,6 +71,7 @@ static unsigned int dc_bias_update(unsigned char *sp)
 #endif
 
 // Method B: optimized with no loop
+#if 0
 static unsigned short bvec_b[BVLEN];
 static unsigned int bvx_b;
 static unsigned int bcur;
@@ -95,6 +96,7 @@ static void dc_bias_init_b(void)
 		bvec_b[i] = dc_bias;
 	bcur = dc_bias * BVLEN;
 }
+#endif
 
 static int rx_callback(airspy_transfer_t *xfer)
 {
@@ -105,7 +107,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 	int dv;		// "discriminant value" - just a random name
 	long dv_anal[5];
 
-#if 0 /* Method Zero */
+#if 1 /* Method Zero */
 	if (bias_timer == 0) {
 		if (xfer->sample_count >= BVLEN) {
 			sp = xfer->samples;
@@ -126,7 +128,9 @@ static int rx_callback(airspy_transfer_t *xfer)
 		// unsigned short int sp;
 		// sample = le16toh(*sp);
 		sample = sp[1]<<8 | sp[0];
+#if 0 /* Method B */
 		dc_bias = dc_bias_update_b(sample);
+#endif
 		value = (int) sample - (int) dc_bias;
 		dv = preamble_match(&rs, value);
 		if (dv < 0) {
@@ -208,11 +212,23 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 	int value;
 	int p;
 
+#if 1 /* Method Zero */
+	if (bias_timer == 0) {
+		if (xfer->sample_count >= BVLEN) {
+			sp = xfer->samples;
+			dc_bias = dc_bias_update(sp);
+		}
+	}
+	bias_timer = (bias_timer + 1) % 10;
+#endif
+
 	sp = xfer->samples;
 	for (i = 0; i < xfer->sample_count; i++) {
 
 		sample = sp[1]<<8 | sp[0];
+#if 0 /* Method B */
 		dc_bias = dc_bias_update_b(sample);
+#endif
 		value = (int) sample - (int) dc_bias;
 
 		if (par.mode_capture == -1) {
@@ -320,7 +336,9 @@ int main(int argc, char **argv) {
 
 	pthread_mutex_init(&rx_mutex, NULL);
 	pthread_cond_init(&rx_cond, NULL);
+#if 0 /* Method B */
 	dc_bias_init_b();
+#endif
 
 	parse(&par, argv);
 
