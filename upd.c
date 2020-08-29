@@ -5,7 +5,12 @@
 
 #include "yoga.h"
 
-int avg_update(struct upd *up, unsigned int len, int p)
+/*
+ * The avg_update essentially has one more parameter: the length of AVGLEN.
+ * We made it a constant in a desperate attempt at optimization according
+ * to the results of profiling with gprof.
+ */
+int avg_update(struct upd *up, int p)
 {
 	int sub;
 	unsigned int x;
@@ -13,16 +18,11 @@ int avg_update(struct upd *up, unsigned int len, int p)
 	x = up->x;
 	sub = up->vec[x];
 	up->vec[x] = p;
-	up->x = (x + 1) % len;
+	up->x = (x + 1) % AVGLEN;
 
+	// AVG_UPD_P(&up->cur, sub, p);
 	up->cur -= sub;
 	up->cur += p;
-#if 0
-	if (up->cur < 0) {	// we never use negative values, so...
-		fprintf(stderr, TAG ": avg_update error, p %d x %d\n",
-		    up->cur, up->x);
-		up->cur = 0;
-	}
-#endif
-	return up->cur;
+
+	return up->cur / AVGLEN;
 }

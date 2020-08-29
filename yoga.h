@@ -3,18 +3,6 @@
  * A dumping ground of global definitions
  */
 
-#define MAXUPD 32
-
-#define AVG_UPD_P(pcur, sub, p)  { *(pcur) -= (sub);  *(pcur) += (p); }
-
-struct upd {
-	int cur;
-	unsigned int x;
-	int vec[MAXUPD];
-};
-
-int avg_update(struct upd *up, unsigned int len, int p);
-
 // PM is the number of bits in preamble, 8.
 // XXX implement "-1st" or "9th" silent bit, check if more packets come in
 #define M     8
@@ -34,13 +22,16 @@ int avg_update(struct upd *up, unsigned int len, int p);
 // Yes, averaging length is larger than DF. Could be up to 10 (the half-bit).
 #define AVGLEN 7
 
-#if AVGLEN > MAXUPD
-#error "No space for AVGLEN in upd"
-#endif
+#define AVG_UPD_P(pcur, sub, p)  { *(pcur) -= (sub);  *(pcur) += (p); }
 
-#if APP > MAXUPD
-#error "No space for M*2 in upd"
-#endif
+struct upd {
+	int cur;
+	unsigned int x;
+	int vec[AVGLEN];
+};
+
+int avg_update(struct upd *up, int p);
+
 struct track {
 	int ap_u;
 	int t_x;

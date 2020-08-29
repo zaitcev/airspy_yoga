@@ -45,7 +45,7 @@ int preamble_match(struct rstate *rs, int value)
 	 * Pass through a smoother and use abs() to make compatible with
 	 * the ideal function.
 	 */
-	p = avg_update(&rs->smoo, AVGLEN, abs(value)) / AVGLEN;
+	p = avg_update(&rs->smoo, abs(value));
 
 	if (++rs->dec < DF)
 		return -1;
@@ -96,8 +96,13 @@ int preamble_match(struct rstate *rs, int value)
 		}
 #if DEBUG
 		r[i] = step;
-#endif
 		cor &= step;
+#else
+		if (!step) {
+			cor = 0;
+			break;
+		}
+#endif
 
 		n = (n + 1) % APP;
 	}

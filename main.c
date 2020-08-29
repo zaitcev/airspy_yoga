@@ -246,7 +246,7 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 
 		} else if (par.mode_capture != 0) {
 
-			p = avg_update(&rs.smoo, AVGLEN, abs(value)) / AVGLEN;
+			p = avg_update(&rs.smoo, abs(value));
 
 			capvv[capx] = value;
 			cappv[capx] = p;
