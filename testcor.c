@@ -23,6 +23,7 @@ int main(int argc, char **argv) {
 	FILE *ifp;
 	char line[80], *nump, *endp;
 	long value;
+	int p;
 	int cv;
 
 	if (argc == 1) {
@@ -59,10 +60,12 @@ int main(int argc, char **argv) {
 			fprintf(stderr, TAG ": Invalid value: %ld\n", value);
 			continue;
 		}
-		cv = preamble_match(&rs, value);
-		if (cv == -1)
-			continue;
-		printf("%d\n", cv);
+		p = avg_update(&rs.smoo, abs((int)value));
+		if (++rs.dec >= DF) {
+			cv = preamble_match(&rs, p);
+			printf("%d\n", cv);
+			rs.dec = 0;
+		}
 	}
 
 	return 0;

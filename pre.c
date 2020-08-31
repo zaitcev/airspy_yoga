@@ -3,8 +3,6 @@
  * Preamble matching correlator
  */
 
-#include <stdlib.h>
-
 #define DEBUG  0
 
 #if DEBUG
@@ -25,12 +23,12 @@ static const int pfun[APP] = {
 	0, 0	// 7 ms
 };
 
-// value: the sample value with DC bias already subtracted
-// return: the correlation (boolean for match or and -1 if decimated)
-int preamble_match(struct rstate *rs, int value)
+// p: the non-negative averaged 'p' value
+// return: the correlation (boolean for match)
+int preamble_match(struct rstate *rs, int p)
 {
 	struct track *tp;
-	int p, sub, avg_p, thr_0, thr_1;
+	int sub, avg_p, thr_0, thr_1;
 	int /* bool */ cor, step;
 	int i, n;
 #if DEBUG
@@ -40,16 +38,6 @@ int preamble_match(struct rstate *rs, int value)
 	memset(v, 0, APP*sizeof(int));
 	memset(r, 0, APP*sizeof(int));
 #endif
-
-	/*
-	 * Pass through a smoother and use abs() to make compatible with
-	 * the ideal function.
-	 */
-	p = avg_update(&rs->smoo, abs(value));
-
-	if (++rs->dec < DF)
-		return -1;
-	rs->dec = 0;
 
 #if DEBUG
 	tx_saved = rs->tx;

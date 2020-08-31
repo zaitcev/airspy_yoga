@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 #include <airspy.h>
 
@@ -22,16 +23,15 @@ struct param {
 
 static struct param par;
 
+/* Only accessed by the receiving thread, not locked. */
+static struct rstate rs;
+
 static pthread_mutex_t rx_mutex;
 static pthread_cond_t rx_cond;
 
 unsigned long sample_count;
-unsigned int last_count;
-unsigned int last_bias_a;
-long last_dv_anal[5];
-
-/* Only accessed by the receiving thread, not locked. */
-static struct rstate rs;
+unsigned long error_count;
+struct timeval count_last;
 
 struct cap1 {
 	int bias;
@@ -39,7 +39,22 @@ struct cap1 {
 	unsigned char buf[];
 };
 
+struct pack1 {
+	struct pack1 *next;
+	unsigned int plen;
+	unsigned char packet[112/8];
+
+	int err_p;
+	unsigned long timed_n, timed_e;
+};
+
 struct cap1 *pcap;
+unsigned int pcnt;
+struct pack1 *phead, *ptail;
+
+static void rstate_hunt(struct rstate *rsp);
+static void packet_deliver(struct rstate *rsp);
+static void packet_timer(struct rstate *rsp, unsigned long n, unsigned long e);
 
 /*
  * We're treating the offset by 0x800 as a part of the DC bias.
@@ -100,12 +115,11 @@ static void dc_bias_init_b(void)
 
 static int rx_callback(airspy_transfer_t *xfer)
 {
-	int i;
+	struct timeval now;
 	unsigned char *sp;
 	unsigned int sample;
-	int value;
-	int dv;		// "discriminant value" - just a random name
-	long dv_anal[5];
+	int value, p;
+	int i;
 
 #if 1 /* Method Zero */
 	if (bias_timer == 0) {
@@ -117,7 +131,13 @@ static int rx_callback(airspy_transfer_t *xfer)
 	bias_timer = (bias_timer + 1) % 10;
 #endif
 
-	memset(dv_anal, 0, sizeof(dv_anal));
+	gettimeofday(&now, NULL);
+	if (now.tv_sec >= count_last.tv_sec + 10) {
+		packet_timer(&rs, sample_count, error_count);
+		sample_count = 0;
+		error_count = 0;
+		count_last = now;
+	}
 
 	sp = xfer->samples;
 	for (i = 0; i < xfer->sample_count; i++) {
@@ -132,15 +152,55 @@ static int rx_callback(airspy_transfer_t *xfer)
 		dc_bias = dc_bias_update_b(sample);
 #endif
 		value = (int) sample - (int) dc_bias;
-		dv = preamble_match(&rs, value);
-		if (dv < 0) {
-			dv_anal[0]++;
-		} else if (dv == 0) {
-			dv_anal[1]++;
-		} else if (dv == 1) {
-			dv_anal[2]++;
+		p = avg_update(&rs.smoo, abs(value));
+
+		if (rs.state == HUNT) {
+			if (++rs.dec >= DF) {
+				if (preamble_match(&rs, p)) {
+					rs.state = HALF;
+					rs.data_len = 56;
+					rs.bit_cnt = 0;
+					memset(rs.packet, 0, 112/8);
+					// P3
+					// rs.err_p = 0;
+				}
+				rs.dec = 0;
+			}
+		} else if (rs.state == HALF) {
+			if (++rs.dec >= SPB/2) {
+				rs.p_half = p;
+				rs.state = DATA;
+				rs.dec = 0;
+			}
 		} else {
-			dv_anal[3]++;
+			if (++rs.dec >= SPB/2) {
+				if (bit_decode(&rs, p) == 0) {
+					if (++rs.bit_cnt >= rs.data_len) {
+						if (rs.data_len == 56 &&
+						    (rs.packet[0] & 0x80) != 0)
+						{
+							rs.data_len = 112;
+							rs.state = HALF;
+						} else {
+							packet_deliver(&rs);
+							rstate_hunt(&rs);
+						}
+					} else {
+						rs.state = HALF;
+					}
+				} else {
+					/*
+					 * Not sure if we should skip
+					 * up to data_len bits here.
+					 * For simplicity, we just go to HUNT.
+					 */
+					rstate_hunt(&rs);
+					pthread_mutex_lock(&rx_mutex);
+					error_count++;
+					pthread_mutex_unlock(&rx_mutex);
+				}
+				rs.dec = 0;
+			}
 		}
 
 		sp += 2;
@@ -148,16 +208,124 @@ static int rx_callback(airspy_transfer_t *xfer)
 
 	pthread_mutex_lock(&rx_mutex);
 	sample_count += xfer->sample_count;
-	last_count = xfer->sample_count;
-	last_bias_a = dc_bias;
-	for (i = 0; i < 5; i++)
-		last_dv_anal[i] += dv_anal[i];
 	pthread_mutex_unlock(&rx_mutex);
 
 	// We are supposed to return -1 if the buffer was not processed, but
 	// we don't see how this can ever be useful. What is the library
 	// going to do with this indication? Stop the streaming?
 	return 0;
+}
+
+/*
+ * We're promiscuous with the manchester, by accepting any level change.
+ * But we may change to only accept the levels used by preamble_match().
+ */
+int bit_decode(struct rstate *rsp, int p)
+{
+	unsigned char bit;
+
+	/*
+	 * Clearly bogus.
+	 */
+	if (rsp->p_half <= 0 || p <= 0)
+		return -1;
+
+	/*
+	 * Manchester proper.
+	 */
+	if (rsp->p_half < p) {
+		bit = 0;
+	} else if (rsp->p_half > p) {
+		bit = 1;
+	} else {
+		// XXX
+		// return -1;
+		bit = 0;
+		// P3
+		if (rsp->err_p == 0)
+			rsp->err_p = p;
+	}
+
+	/*
+	 * Save the bit.
+	 */
+	rsp->packet[rsp->bit_cnt >> 3] |= bit << (7 - (rsp->bit_cnt & 07));
+
+	return 0;
+}
+
+/*
+ * Let's avoid triggering an erroneous match with stale samples.
+ */
+static void rstate_hunt(struct rstate *rsp)
+{
+
+	rsp->tx = 0;
+	memset(rsp->tvec, 0, sizeof(struct track)*NT);
+
+	rsp->state = HUNT;
+}
+
+static void packet_deliver(struct rstate *rsp)
+{
+	struct pack1 *pp;
+
+	pp = malloc(sizeof(struct pack1));
+	if (pp == NULL)
+		return;
+	memset(pp, 0, sizeof(struct pack1));
+
+	pthread_mutex_lock(&rx_mutex);
+	if (pcap == NULL) {
+
+		pp->plen = rsp->data_len / 8;
+		memcpy(pp->packet, rsp->packet, pp->plen);
+		// P3
+		pp->err_p = rsp->err_p;
+		rsp->err_p = 0;
+
+		if (pcnt == 0) {
+			phead = pp;
+			ptail = pp;
+		} else {
+			ptail->next = pp;
+			ptail = pp;
+		}
+		pcnt++;
+
+		pthread_cond_broadcast(&rx_cond);
+	}
+	pthread_mutex_unlock(&rx_mutex);
+}
+
+static void packet_timer(struct rstate *rsp, unsigned long n, unsigned long e)
+{
+	struct pack1 *pp;
+
+	pp = malloc(sizeof(struct pack1));
+	if (pp == NULL)
+		return;
+	memset(pp, 0, sizeof(struct pack1));
+
+	pthread_mutex_lock(&rx_mutex);
+	if (pcap == NULL) {
+
+		pp->plen = 0;
+		pp->timed_n = n;
+		pp->timed_e = e;
+
+		if (pcnt == 0) {
+			phead = pp;
+			ptail = pp;
+		} else {
+			ptail->next = pp;
+			ptail = pp;
+		}
+		pcnt++;
+
+		pthread_cond_broadcast(&rx_cond);
+	}
+	pthread_mutex_unlock(&rx_mutex);
 }
 
 /*
@@ -209,8 +377,8 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 	int i;
 	unsigned char *sp;
 	unsigned int sample;
-	int value;
-	int p;
+	int value, p;
+	int match;
 
 #if 1 /* Method Zero */
 	if (bias_timer == 0) {
@@ -230,23 +398,22 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		dc_bias = dc_bias_update_b(sample);
 #endif
 		value = (int) sample - (int) dc_bias;
+		p = avg_update(&rs.smoo, abs(value));
 
 		if (par.mode_capture == -1) {
 
-			p = preamble_match(&rs, value);
+			match = preamble_match(&rs, p);
 
 			capvv[capx] = value;
 			cappv[capx] = p;
 			capx = (capx + 1) % CAPLEN;
 
-			if (p == 1) {
+			if (match == 1) {
 				if (cap_timer == 0)
 					cap_timer = CAPLEN - CAPBACK_P;
 			}
 
 		} else if (par.mode_capture != 0) {
-
-			p = avg_update(&rs.smoo, abs(value));
 
 			capvv[capx] = value;
 			cappv[capx] = p;
@@ -331,7 +498,6 @@ int main(int argc, char **argv) {
 	int rc;
 	struct airspy_device *device = NULL;
 	int (*rx_cb)(airspy_transfer_t *xfer);
-	unsigned long n;
 	int i;
 
 	pthread_mutex_init(&rx_mutex, NULL);
@@ -435,7 +601,7 @@ int main(int argc, char **argv) {
 	// 0x20  Mixer current: 0 max current, 1 normal current
 	// 0x10  Mixer mode:    0 manual mode, 1 auto mode
 	// 0x0f  manual gain level
-	rc = airspy_set_mixer_gain(device, 5);
+	rc = airspy_set_mixer_gain(device, 0x10);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_mixer_gain() failed: %s (%d)\n",
@@ -449,6 +615,8 @@ int main(int argc, char **argv) {
 	// 0x20  LNA1 Power:    0 on, 1 off
 	// 0x10  Auto gain:     0 auto, 1 manual
 	// 0x0F  manual gain level
+	//
+	// Value of -ga 12 appears to work best for an unknown reason.
 	rc = airspy_set_lna_gain(device, par.lna_gain);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
@@ -462,6 +630,7 @@ int main(int argc, char **argv) {
 	if (par.mode_capture) {
 		rx_cb = rx_callback_capture;
 	} else {
+		gettimeofday(&count_last, NULL);
 		rx_cb = rx_callback;
 	}
 	rc = airspy_start_rx(device, rx_cb, NULL);
@@ -523,24 +692,47 @@ int main(int argc, char **argv) {
 
 	while (airspy_is_streaming(device)) {
 
-		sleep(10);
-
 		pthread_mutex_lock(&rx_mutex);
-		n = sample_count;
-		sample_count = 0;
+		while (pcnt) {
+			struct pack1 *pp;
+
+			--pcnt;
+			pp = phead;
+			phead = pp->next;
+			pthread_mutex_unlock(&rx_mutex);
+
+			if (pp->plen) {
+				printf("*");
+				for (i = 0; i < pp->plen; i++) {
+					printf("%02x", pp->packet[i]);
+				}
+				// P3 - bad manchester
+				if (pp->err_p) {
+					printf(";err_p=%d", pp->err_p);
+				}
+				printf(";\n");
+			} else {
+				printf("# samples %lu errors %lu\n",
+				    pp->timed_n, pp->timed_e);
+			}
+			free(pp);
+
+			pthread_mutex_lock(&rx_mutex);
+		}
 		pthread_mutex_unlock(&rx_mutex);
 
-		printf("\n");  // for visibility
-		printf("samples %lu/10 bias %u\n", n, last_bias_a);
-
-		printf("dv analysis: skip %ld bad %ld good %ld error %ld\n",
-		    last_dv_anal[0], last_dv_anal[1], last_dv_anal[2],
-		    last_dv_anal[3]);
 		pthread_mutex_lock(&rx_mutex);
-		memset(last_dv_anal, 0, sizeof(last_dv_anal));
+		if (pcnt == 0) {
+			rc = pthread_cond_wait(&rx_cond, &rx_mutex);
+			if (rc != 0) {
+				pthread_mutex_unlock(&rx_mutex);
+				fprintf(stderr,
+				   TAG "pthread_cond_wait() failed:"
+				   " %d\n", rc);
+				exit(1);
+			}
+		}
 		pthread_mutex_unlock(&rx_mutex);
-
-		printf("last [%u]\n", last_count);
 	}
 
 	airspy_stop_rx(device);

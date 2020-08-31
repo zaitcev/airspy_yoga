@@ -41,11 +41,19 @@ struct track {
 /*
  * The receiver state: the bank of tracks, the smoother, etc.
  */
+enum R_state { HUNT, HALF, DATA };
 struct rstate {
 	struct upd smoo;	// a smoother for half-bits
 	int dec;
+	enum R_state state;
 	unsigned int tx;	// running index 0..NT-1
 	struct track tvec[NT];
+	int p_half;
+	unsigned int data_len;	// expected length for HALF and DATA states
+	unsigned int bit_cnt;
+	unsigned char packet[112/8];
+	int err_p; // P3
 };
 
-int preamble_match(struct rstate *rsp, int value);
+int preamble_match(struct rstate *rsp, int p);
+int bit_decode(struct rstate *rsp, int p);
