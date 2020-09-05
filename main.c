@@ -18,7 +18,10 @@
 
 struct param {
 	int mode_capture;
+	int short_ok;
 	int lna_gain;
+	int mix_gain;
+	int vga_gain;
 };
 
 static struct param par;
@@ -44,7 +47,7 @@ struct pack1 {
 	unsigned int plen;
 	unsigned char packet[112/8];
 
-	int err_p;
+	int avg_p;
 	unsigned long timed_n, timed_e;
 };
 
@@ -63,8 +66,8 @@ static void packet_timer(struct rstate *rsp, unsigned long n, unsigned long e);
 static unsigned int dc_bias = 0x800;
 
 static void Usage(void) {
-	fprintf(stderr, "Usage: airspy_yoga [-c pre|NNNN]"
-            " [-ga lna_gain]\n");
+	fprintf(stderr, "Usage: airspy_yoga [-c pre|NNNN] [-S]"
+            " [-ga lna_gain] [-gm mix_gain] [-gv vga_gain]\n");
 	exit(1);
 }
 
@@ -161,8 +164,6 @@ static int rx_callback(airspy_transfer_t *xfer)
 					rs.data_len = 56;
 					rs.bit_cnt = 0;
 					memset(rs.packet, 0, 112/8);
-					// P3
-					// rs.err_p = 0;
 				}
 				rs.dec = 0;
 			}
@@ -238,12 +239,7 @@ int bit_decode(struct rstate *rsp, int p)
 	} else if (rsp->p_half > p) {
 		bit = 1;
 	} else {
-		// XXX
-		// return -1;
-		bit = 0;
-		// P3
-		if (rsp->err_p == 0)
-			rsp->err_p = p;
+		return -1;
 	}
 
 	/*
@@ -270,6 +266,9 @@ static void packet_deliver(struct rstate *rsp)
 {
 	struct pack1 *pp;
 
+	if (rsp->data_len < 112 && !par.short_ok)
+		return;
+
 	pp = malloc(sizeof(struct pack1));
 	if (pp == NULL)
 		return;
@@ -280,9 +279,6 @@ static void packet_deliver(struct rstate *rsp)
 
 		pp->plen = rsp->data_len / 8;
 		memcpy(pp->packet, rsp->packet, pp->plen);
-		// P3
-		pp->err_p = rsp->err_p;
-		rsp->err_p = 0;
 
 		if (pcnt == 0) {
 			phead = pp;
@@ -294,6 +290,8 @@ static void packet_deliver(struct rstate *rsp)
 		pcnt++;
 
 		pthread_cond_broadcast(&rx_cond);
+	} else {
+		free(pp);
 	}
 	pthread_mutex_unlock(&rx_mutex);
 }
@@ -313,6 +311,11 @@ static void packet_timer(struct rstate *rsp, unsigned long n, unsigned long e)
 		pp->plen = 0;
 		pp->timed_n = n;
 		pp->timed_e = e;
+		/*
+		 * This is obviously racy, rx_callback does not lock
+		 * before updating rs.smoo. But it's okay for our purpose.
+		 */
+		pp->avg_p = rsp->smoo.cur / AVGLEN;
 
 		if (pcnt == 0) {
 			phead = pp;
@@ -445,7 +448,9 @@ static void parse(struct param *p, char **argv) {
 	long lv;
 
 	memset(p, 0, sizeof(struct param));
-	p->lna_gain = 1;
+	p->lna_gain = 14;
+	p->mix_gain = 12;
+	p->vga_gain = 10;
 
 	argv++;
 	while ((arg = *argv++) != NULL) {
@@ -469,18 +474,48 @@ static void parse(struct param *p, char **argv) {
 					p->mode_capture = lv;
 				}
 				break;
+			case 'S':
+				p->short_ok = 1;
+				break;
 			case 'g':
-				if (arg[2] == 'a') {
+				/*
+				 * These gain values are interpreted by the
+				 * firmware. They may not be directly written
+				 * into the registers of R820T2.
+				 */
+				if (arg[2] == 'a') {		// RF gain, LNA
 					if ((arg = *argv++) == NULL || *arg == '-') {
 						fprintf(stderr, TAG ": missing -ga value\n");
 						Usage();
 					}
 					lv = strtol(arg, NULL, 10);
-					if (lv < 0 || lv >= 16) {
+					if (lv < 0 || lv >= 14) {
 						fprintf(stderr, TAG ": invalid -ga value\n");
 						Usage();
 					}
-					p->lna_gain = lv | 0x10;
+					p->lna_gain = lv;
+				} else if (arg[2] == 'm') {	// Mixer gain
+					if ((arg = *argv++) == NULL || *arg == '-') {
+						fprintf(stderr, TAG ": missing -gm value\n");
+						Usage();
+					}
+					lv = strtol(arg, NULL, 10);
+					if (lv < 0 || lv >= 15) {
+						fprintf(stderr, TAG ": invalid -gm value\n");
+						Usage();
+					}
+					p->mix_gain = lv;
+				} else if (arg[2] == 'v') {	// IF gain, VGA
+					if ((arg = *argv++) == NULL || *arg == '-') {
+						fprintf(stderr, TAG ": missing -gv value\n");
+						Usage();
+					}
+					lv = strtol(arg, NULL, 10);
+					if (lv < 0 || lv >= 15) {
+						fprintf(stderr, TAG ": invalid -gv value\n");
+						Usage();
+					}
+					p->vga_gain = lv;
 				} else {
 					Usage();
 				}
@@ -575,57 +610,73 @@ int main(int argc, char **argv) {
 		goto err_bias;
 	}
 
+	// rc = airspy_set_mixer_agc(device, 0);
+	// if (rc < 0)
+	// 	return rc;
+	// rc = airspy_set_lna_agc(device, 0);
+	// if (rc < 0)
+	// 	return rc;
+
 	// VGA is "Variable Gain Amplifier": the exit amplifier after mixer
 	// and filter in R820T.
 	//
-	// default in airspy_rx is 5; rtl-sdr sets 11 (26.5 dB) FWIW.
+	// Default in airspy_rx is 5; rtl-sdr sets 11 (26.5 dB) FWIW.
 	// We experimented a little, and leave 12 for now.
 	//
-	// 0x80  unused
+	// Register address: 0x0c
+	// 0x80  unused, set 1
 	// 0x40  VGA power:     0 off, 1 on
-	// 0x20  unused
+	// 0x20  unused, set 1
 	// 0x10  VGA mode:      0 gain control by VAGC pin,
 	//                      1 gain control by code in this register
-	// 0x0f  VGA gain code: 0x0 -12 dB, 0xf +40.5 dB
-	rc = airspy_set_vga_gain(device, 12);
+	// 0x0f  VGA gain code: 0x0 -12 dB, 0xf +40.5 dB, with -3.5dB/step
+	//
+	// The software only transfers the value 0..15. Firmware sets the rest.
+	rc = airspy_set_vga_gain(device, par.vga_gain);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_vga_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
 
-	// airspy_rx default is 5; rtl-sdr does 0x10 to enable auto.
+	// Mixer has its own gain. Not sure how that works, perhaps relative
+	// to the oscillator signal.
 	//
-	// 0x80  unused
+	// Default in airspy_rx is 5; rtl-sdr does 0x10 to enable auto.
+	//
+	// Register address: 0x07
+	// 0x80  unused, set 0
 	// 0x40  Mixer power:   0 off, 1 on
 	// 0x20  Mixer current: 0 max current, 1 normal current
 	// 0x10  Mixer mode:    0 manual mode, 1 auto mode
 	// 0x0f  manual gain level
-	rc = airspy_set_mixer_gain(device, 0x10);
+	//
+	// The software only transfers the value 0..15. Firmware sets the rest.
+	rc = airspy_set_mixer_gain(device, par.mix_gain);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_mixer_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
 
-	// airspy_rx default is 1
+	// The LNA is the pre-amp at the receive frequency before mixing.
 	//
+	// The default in airspy_rx is 1.
+	//
+	// Register address: 0x05
 	// 0x80  Loop through:  0 on, 1 off  -- weird, backwards
-	// 0x40  unused
+	// 0x40  unused, set 0
 	// 0x20  LNA1 Power:    0 on, 1 off
 	// 0x10  Auto gain:     0 auto, 1 manual
-	// 0x0F  manual gain level
+	// 0x0F  manual gain level, 0 is min gain, 15 is max gain
 	//
-	// Value of -ga 12 appears to work best for an unknown reason.
+	// The software only transfers the value 0..14. Firmware sets the rest.
 	rc = airspy_set_lna_gain(device, par.lna_gain);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr,
 		    TAG ": airspy_set_lna_gain() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
 	}
-	// These two are alternative to the direct gain settings
-	// rc = airspy_set_linearity_gain(device, linearity_gain_val);
-	// rc = airspy_set_sensitivity_gain(device, sensitivity_gain_val);
 
 	if (par.mode_capture) {
 		rx_cb = rx_callback_capture;
@@ -706,14 +757,10 @@ int main(int argc, char **argv) {
 				for (i = 0; i < pp->plen; i++) {
 					printf("%02x", pp->packet[i]);
 				}
-				// P3 - bad manchester
-				if (pp->err_p) {
-					printf(";err_p=%d", pp->err_p);
-				}
 				printf(";\n");
 			} else {
-				printf("# samples %lu errors %lu\n",
-				    pp->timed_n, pp->timed_e);
+				printf("# samples %lu errors %lu avg_p %d\n",
+				    pp->timed_n, pp->timed_e, pp->avg_p);
 			}
 			free(pp);
 

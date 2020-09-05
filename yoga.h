@@ -52,7 +52,6 @@ struct rstate {
 	unsigned int data_len;	// expected length for HALF and DATA states
 	unsigned int bit_cnt;
 	unsigned char packet[112/8];
-	int err_p; // P3
 };
 
 int preamble_match(struct rstate *rsp, int p);
