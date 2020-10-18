@@ -28,4 +28,4 @@ upd.o: upd.c yoga.h
 	${CC} ${CFLAGS} -c -o upd.o upd.c
 
 clean:
-	rm -f airspy_yoga *.o
+	rm -f airspy_yoga test_cor *.o
