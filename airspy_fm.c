@@ -38,10 +38,10 @@ struct rx_state {
 	float prev_phi;
 	unsigned long hgram[HGLEN];
 	unsigned long hgram_e1, hgram_e2;
-	float hgram_e2_save_d;
-	int hgram_e2_save_x;
 	int fm_cnt;
 	unsigned long fm_e1, fm_e2;
+	float fm_e2_save_d;
+	int fm_e2_save_x;
 };
 
 struct rx_counts {
@@ -53,7 +53,7 @@ struct rx_counts {
 struct packet {
 	struct packet *next;
 	int num;		// number of complex samples
-	int *buf;		// XXX make these short
+	short int *buf;
 };
 
 static int rx_state_init(struct rx_state *rsp, int avglen);
@@ -77,7 +77,7 @@ static struct param par;
 static unsigned int dc_bias = 0x800;
 static unsigned int bias_timer;
 
-#define AVGLEN 500	/* 20 KHz */
+#define AVGLEN 1000	/* 20 KHz */
 
 #define PMAX  20
 
@@ -335,13 +335,15 @@ static void rx_state_fini(struct rx_state *rsp)
 
 static void scan_buf(struct rx_state *rsp, struct packet *pp)
 {
-	const int *p;
+	const short int *p;
 	int i;
 	int x, y;
 	int x_comp, y_comp;
 	float phi;
 	float delta;
 	int buck_x;
+	int val;
+	unsigned char lebuf[2];
 
 	p = pp->buf;
 	for (i = 0; i < pp->num; i++) {
@@ -350,79 +352,76 @@ static void scan_buf(struct rx_state *rsp, struct packet *pp)
 		/*
 		 * For FM, we use averaging as essential LPF.
 		 */
-		x = upd_ate(&rsp->uavg_i, p[0]);
-		y = upd_ate(&rsp->uavg_q, p[1]);
-
-		if (abs(x) >= 2048) {
-			rsp->badx++;
-			x = 0;
-		}
-		if (abs(y) >= 2048) {
-			rsp->bady++;
-			y = 0;
-		}
-		x_comp = com_tab[abs(x)];
-		y_comp = com_tab[abs(y)];
-		switch (((y < 0) << 1) + (x < 0)) {
-		default:
-			phi = phi_tab[y_comp][x_comp];
-			break;
-		case 1:
-			phi = phi_tab[x_comp][y_comp] + M_PI*0.5;
-			break;
-		case 3:
-			phi = phi_tab[y_comp][x_comp] + M_PI;
-			break;
-		case 2:
-			phi = phi_tab[x_comp][y_comp] + M_PI*1.5;
-		}
-
-		delta = phi - rsp->prev_phi;
-		if (delta < -1*M_PI)
-			delta += 2*M_PI;
-		if (delta >= M_PI)
-			delta -= 2*M_PI;
-
-		if (delta < -1*M_PI || delta >= M_PI) {
-			rsp->hgram_e1++;
-		} else {
-			buck_x = (int)(((delta + M_PI) / (2*M_PI)) * HGLEN);
-			if (buck_x < 0 || buck_x >= HGLEN) {	// never happens
-				rsp->hgram_e2++;
-				rsp->hgram_e2_save_d = delta;
-				rsp->hgram_e2_save_x = buck_x;
-			} else {
-				rsp->hgram[buck_x]++;
-			}
-		}
+		upd_ate(&rsp->uavg_i, p[0]);
+		upd_ate(&rsp->uavg_q, p[1]);
 
 		if (rsp->fm_cnt == 0 ||
-		    rsp->fm_cnt == 417 ||
-		    rsp->fm_cnt == 833) {
-			int val;
-			unsigned char lebuf[2];
-			/*
-			 * According to the Internet, the normal
-			 * deviation for broadcast FM is 65 KHz.
-			 * We start with 1000 KHz, a 20% of the Fc.
-			 */
-			val = (int) ((delta / (M_PI * (1000.0/5000.0))) * 32768);
+		    rsp->fm_cnt == 833 ||
+		    rsp->fm_cnt == 1666) {
+
+			x = UPD_CUR(&rsp->uavg_i);
+			y = UPD_CUR(&rsp->uavg_q);
+
+			if (abs(x) >= 2048) {
+				rsp->badx++;
+				x = 0;
+			}
+			if (abs(y) >= 2048) {
+				rsp->bady++;
+				y = 0;
+			}
+			x_comp = com_tab[abs(x)];
+			y_comp = com_tab[abs(y)];
+			switch (((y < 0) << 1) + (x < 0)) {
+			default:
+				phi = phi_tab[y_comp][x_comp];
+				break;
+			case 1:
+				phi = phi_tab[x_comp][y_comp] + M_PI*0.5;
+				break;
+			case 3:
+				phi = phi_tab[y_comp][x_comp] + M_PI;
+				break;
+			case 2:
+				phi = phi_tab[x_comp][y_comp] + M_PI*1.5;
+			}
+
+			delta = phi - rsp->prev_phi;
+			if (delta < -1*M_PI)
+				delta += 2*M_PI;
+			if (delta >= M_PI)
+				delta -= 2*M_PI;
+
+			if (delta < -1*M_PI || delta >= M_PI) {
+				rsp->hgram_e1++;
+			} else {
+				buck_x = (int)(((delta + M_PI) / (2*M_PI)) * HGLEN);
+				if (buck_x < 0 || buck_x >= HGLEN) {	// never happens
+					rsp->hgram_e2++;
+				} else {
+					rsp->hgram[buck_x]++;
+				}
+			}
+
+			val = (int) ((delta / M_PI) * 32768);
 			if (val < -32768) {
 				rsp->fm_e1++;
 				val = 0x8000;
 			} else if (val >= 32767) {
+				rsp->fm_e2_save_d = delta;
+				rsp->fm_e2_save_x = val;
 				rsp->fm_e2++;
 				val = 0x8000;
 			}
 			lebuf[0] = val & 0xFF;
 			lebuf[1] = (val >> 8) & 0xFF;
 			fwrite(lebuf, 2, 1, stdout);
+
+			rsp->prev_phi = phi;
 		}
-		if (++rsp->fm_cnt >= 1250) {
+		if (++rsp->fm_cnt >= 2500) {
 			rsp->fm_cnt = 0;
 		}
-
-		rsp->prev_phi = phi;
 
 		p += 2;
 	}
@@ -430,7 +429,7 @@ static void scan_buf(struct rx_state *rsp, struct packet *pp)
 
 static void dump_buf(struct rx_state *rsp, struct packet *pp)
 {
-	const int *p;
+	const short int *p;
 	int i;
 	int lim;
 
@@ -457,9 +456,10 @@ static void timer_print(
 
 	fprintf(stderr, "# bufs %lu nocore %lu drop %lu"
 	    " badx %lu bady %lu avg I %d Q %d"
-	    " fme1 %lu fme2 %lu\n",
+	    " fme1 %lu fme2 %lu (d %f x %d)\n",
 	    bufcnt, nocore, bufdrop, rsp->badx, rsp->bady,
-	    avg_i, avg_q, rsp->fm_e1, rsp->fm_e2);
+	    avg_i, avg_q, rsp->fm_e1, rsp->fm_e2,
+	    rsp->fm_e2_save_d, rsp->fm_e2_save_x);
 
 	rsp->badx = 0;
 	rsp->bady = 0;
@@ -474,9 +474,7 @@ static void timer_print(
 	 * because the main output of FM receiver is the sound stream.
 	 */
 	ofp = stderr;
-	fprintf(ofp, "# e1 %lu e2 %lu (d %f x %d)\n",
-	    rsp->hgram_e1, rsp->hgram_e2,
-	    rsp->hgram_e2_save_d, rsp->hgram_e2_save_x);
+	fprintf(ofp, "# e1 %lu e2 %lu\n", rsp->hgram_e1, rsp->hgram_e2);
 	for (i = 0; i < HGLEN; i++) {
 		fprintf(ofp, " %f %lu\n",
 		    (i + 0.5) * ((2*M_PI)/HGLEN), rsp->hgram[i]);
@@ -583,7 +581,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 	int i;
 	unsigned char *sp;
 	struct packet *pp;
-	int *bp;
+	short int *buf, *bp;
 
 	if (bias_timer == 0) {
 		if (xfer->sample_count >= BVLEN) {
@@ -596,40 +594,46 @@ static int rx_callback(airspy_transfer_t *xfer)
 	/*
 	 * Premature optimization is the root of all evil. -- D. Knuth
 	 */
-	bp = malloc(xfer->sample_count * sizeof(int));
-	if (bp == NULL) {
+	buf = malloc(xfer->sample_count * 2 * sizeof(short));
+	if (buf == NULL) {
 		pthread_mutex_lock(&rx_mutex);
 		c_stat.c_nocore++;
 		pthread_mutex_unlock(&rx_mutex);
 		return 0;
 	}
 
+	bp = buf;
 	sp = xfer->samples;
 	for (i = 0; i < xfer->sample_count; i += 4) {
 		unsigned int sample;
 		int value;
 
 		/*
-		 * This also decimates by two. We can re-insert the
-		 * zeroes right back in if it's necessary later.
+		 * We do not decimate by two, as an experiment.
+		 * Only decimate after filtering.
 		 */
 
 		sample = sp[1]<<8 | sp[0];
 		value = (int) sample - (int) dc_bias;
-		bp[i+0] = value;	// I(0) = cos(0 *pi/2) * x(0)
+		bp[0] = value;		// I(0) = cos(0 * pi/2) * x(0)
+		bp[1] = 0;		// Q(0) = 0
 
 		sample = sp[3]<<8 | sp[2];
 		value = (int) sample - (int) dc_bias;
-		bp[i+1] = value * -1;	// Q(0) = -j*sin(1 * pi/2) * x(1)
+		bp[2] = 0;		// I(1) = 0
+		bp[3] = value * -1;	// Q(1) = -j*sin(1 * pi/2) * x(1)
 
 		sample = sp[5]<<8 | sp[4];
 		value = (int) sample - (int) dc_bias;
-		bp[i+2] = value * -1;	// I(1) = cos(2 * pi/2) * x(2)
+		bp[4] = value * -1;	// I(2) = cos(2 * pi/2) * x(2)
+		bp[5] = 0;		// Q(2) = 0
 
 		sample = sp[7]<<8 | sp[6];
 		value = (int) sample - (int) dc_bias;
-		bp[i+3] = value;	// Q(1) = -j*sin(3 * pi/2) * x(3)
+		bp[6] = 0;		// I(3) = 0
+		bp[7] = value;		// Q(3) = -j*sin(3 * pi/2) * x(3)
 
+		bp += 8;
 		sp += 8;
 	}
 
@@ -642,8 +646,8 @@ static int rx_callback(airspy_transfer_t *xfer)
 		return 0;
 	}
 	memset(pp, 0, sizeof(struct packet));
-	pp->num = xfer->sample_count / 2;
-	pp->buf = bp;
+	pp->num = xfer->sample_count;
+	pp->buf = buf;
 
 	pthread_mutex_lock(&rx_mutex);
 	if (pcnt >= PMAX) {
