@@ -12,6 +12,7 @@
 
 #include <airspy.h>
 
+#include "upd.h"
 #include "yoga.h"
 
 #define TAG "airspy_yoga"
@@ -155,7 +156,7 @@ static int rx_callback(airspy_transfer_t *xfer)
 		dc_bias = dc_bias_update_b(sample);
 #endif
 		value = (int) sample - (int) dc_bias;
-		p = avg_update(&rs.smoo, abs(value));
+		p = upd_ate(&rs.smoo, abs(value));
 
 		if (rs.state == HUNT) {
 			if (++rs.dec >= DF) {
@@ -315,7 +316,7 @@ static void packet_timer(struct rstate *rsp, unsigned long n, unsigned long e)
 		 * This is obviously racy, rx_callback does not lock
 		 * before updating rs.smoo. But it's okay for our purpose.
 		 */
-		pp->avg_p = rsp->smoo.cur / AVGLEN;
+		pp->avg_p = UPD_CUR(&rsp->smoo);
 
 		if (pcnt == 0) {
 			phead = pp;
@@ -401,7 +402,7 @@ static int rx_callback_capture(airspy_transfer_t *xfer)
 		dc_bias = dc_bias_update_b(sample);
 #endif
 		value = (int) sample - (int) dc_bias;
-		p = avg_update(&rs.smoo, abs(value));
+		p = upd_ate(&rs.smoo, abs(value));
 
 		if (par.mode_capture == -1) {
 
@@ -537,6 +538,7 @@ int main(int argc, char **argv) {
 
 	pthread_mutex_init(&rx_mutex, NULL);
 	pthread_cond_init(&rx_cond, NULL);
+	upd_init(&rs.smoo, AVGLEN);
 #if 0 /* Method B */
 	dc_bias_init_b();
 #endif

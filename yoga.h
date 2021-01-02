@@ -22,16 +22,6 @@
 // Yes, averaging length is larger than DF. Could be up to 10 (the half-bit).
 #define AVGLEN 7
 
-#define AVG_UPD_P(pcur, sub, p)  { *(pcur) -= (sub);  *(pcur) += (p); }
-
-struct upd {
-	int cur;
-	unsigned int x;
-	int vec[AVGLEN];
-};
-
-int avg_update(struct upd *up, int p);
-
 struct track {
 	int ap_u;
 	int t_x;

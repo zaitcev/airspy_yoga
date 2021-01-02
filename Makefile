@@ -22,9 +22,9 @@ airspy_yoga: main.o pre.o upd.o
 test_cor: testcor.o  pre.o upd.o
 	${CC} -o test_cor testcor.o pre.o upd.o
 
-main.o: main.c yoga.h
-pre.o: pre.c yoga.h
-upd.o: upd.c yoga.h
+main.o: main.c upd.h yoga.h
+pre.o: pre.c upd.h yoga.h
+upd.o: upd.c upd.h
 
 clean:
 	rm -f airspy_yoga test_cor *.o

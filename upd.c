@@ -1,16 +1,26 @@
 /*
- * airspy_yoga
  * The "update thing": a device used to keep an average
  */
 
-#include "yoga.h"
+#include <stdlib.h>
+#include <string.h>
 
-/*
- * The avg_update essentially has one more parameter: the length of AVGLEN.
- * We made it a constant in a desperate attempt at optimization according
- * to the results of profiling with gprof.
- */
-int avg_update(struct upd *up, int p)
+#include "upd.h"
+
+int upd_init(struct upd *up, int length)
+{
+	void *p;
+
+	p = malloc(length * sizeof(int));
+	if (!p)
+		return -1;
+	memset(up, 0, sizeof(struct upd));
+	up->len = length;
+	up->vec = p;
+	return 0;
+}
+
+int upd_ate(struct upd *up, int p)
 {
 	int sub;
 	unsigned int x;
@@ -18,11 +28,17 @@ int avg_update(struct upd *up, int p)
 	x = up->x;
 	sub = up->vec[x];
 	up->vec[x] = p;
-	up->x = (x + 1) % AVGLEN;
+	up->x = (x + 1) % up->len;
 
 	// AVG_UPD_P(&up->cur, sub, p);
 	up->cur -= sub;
 	up->cur += p;
 
-	return up->cur / AVGLEN;
+	return up->cur / up->len;
+}
+
+void upd_fini(struct upd *up)
+{
+	free(up->vec);
+	up->vec = NULL;
 }

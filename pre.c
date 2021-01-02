@@ -10,6 +10,7 @@
 #include <string.h>
 #endif
 
+#include "upd.h"
 #include "yoga.h"
 
 static const int pfun[APP] = {

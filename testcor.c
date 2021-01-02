@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "upd.h"
 #include "yoga.h"
 
 #define TAG "testcor"
@@ -25,6 +26,8 @@ int main(int argc, char **argv) {
 	long value;
 	int p;
 	int cv;
+
+	upd_init(&rs.smoo, AVGLEN);
 
 	if (argc == 1) {
 		ifp = stdin;
@@ -60,7 +63,7 @@ int main(int argc, char **argv) {
 			fprintf(stderr, TAG ": Invalid value: %ld\n", value);
 			continue;
 		}
-		p = avg_update(&rs.smoo, abs((int)value));
+		p = upd_ate(&rs.smoo, abs((int)value));
 		if (++rs.dec >= DF) {
 			cv = preamble_match(&rs, p);
 			printf("%d\n", cv);
