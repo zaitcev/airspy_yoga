@@ -1,13 +1,13 @@
+#!/usr/bin/python3
 #
 # pythagorean triangle generator
 #
-
-from __future__ import print_function
+# The version in ruat does not deal any of the AirSpy-style unsigned
+# representations: all integers are signed.
+#
 
 import math
 import sys
-
-import six
 
 TAG="pythagen"
 
@@ -40,7 +40,6 @@ class Param:
                     raise ParamError("Unknown parameter " + arg)
             else:
                 raise ParamError("Positional parameter supplied")
-                self.repo = arg
         if not (7 <= self.bits <= 12):
             raise ParamError("Number of bits (-b) must be 7 .. 12")
 
@@ -53,13 +52,13 @@ def pyth(x, y):
     """
     return math.sqrt(float(x*x + y*y))
 
-def apyth(nbits, i, j):
-    """
-    :param nbits: number of bits in the unsigned integer (location of the zero)
-    :param i: an unsigned integer that is actually signed and offset by 2^nbits
-    :param j: ditto
-    """
-    return pyth(i - (1 << (nbits-1)), j - (1 << (nbits-1)))
+#def apyth(nbits, i, j):
+#    """
+#    :param nbits: number of bits in the unsigned integer (location of the zero)
+#    :param i: an unsigned integer that is actually signed and offset by 2^nbits
+#    :param j: ditto
+#    """
+#    return pyth(i - (1 << (nbits-1)), j - (1 << (nbits-1)))
 
 def main(args):
     try:
@@ -71,9 +70,9 @@ def main(args):
 
     #print("{")
     #n = 1 << par.bits
-    #for i in six.moves.range(n):
+    #for i in range(n):
     #    print("  // %d" % i)
-    #    for j in six.moves.range(n):
+    #    for j in range(n):
     #        k = int(apyth(par.bits, i, j))
     #        comma = "" if i == n-1 and j == n-1 else ","
     #        print("  %d%s" % (k, comma))
@@ -92,8 +91,8 @@ def main(args):
 
     # 2048 is valid because -2048 exists (barely), but we don't test it.
     # The precision near the zero is absolutely awful when using less than 12.
-    for i in six.moves.range(100,2048):
-        for j in six.moves.range(100,2048):
+    for i in range(100,2048):
+        for j in range(100,2048):
             k0 = int(math.sqrt(float(i*i + j*j)))
             #k = int(apyth(par.bits, i+(1<<(par.bits-1)), j+(1<<(par.bits-1))))
             if par.bits != 12:
