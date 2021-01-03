@@ -18,8 +18,7 @@
 
 // #include "fec.h"
 #include "upd.h"
-
-#include "phasetab.h"
+#include "xyphi.h"
 
 #define TAG "airspy_fm"
 
@@ -35,12 +34,12 @@ struct param {
 struct rx_state {
 	struct upd uavg_i, uavg_q;
 	unsigned long badx, bady;
-	float prev_phi;
+	double prev_phi;
 	unsigned long hgram[HGLEN];
 	unsigned long hgram_e1, hgram_e2;
 	int fm_cnt;
 	unsigned long fm_e1, fm_e2;
-	float fm_e2_save_d;
+	double fm_e2_save_d;
 	int fm_e2_save_x;
 };
 
@@ -338,9 +337,8 @@ static void scan_buf(struct rx_state *rsp, struct packet *pp)
 	const short int *p;
 	int i;
 	int x, y;
-	int x_comp, y_comp;
-	float phi;
-	float delta;
+	double phi;
+	double delta;
 	int buck_x;
 	int val;
 	unsigned char lebuf[2];
@@ -370,21 +368,7 @@ static void scan_buf(struct rx_state *rsp, struct packet *pp)
 				rsp->bady++;
 				y = 0;
 			}
-			x_comp = com_tab[abs(x)];
-			y_comp = com_tab[abs(y)];
-			switch (((y < 0) << 1) + (x < 0)) {
-			default:
-				phi = phi_tab[y_comp][x_comp];
-				break;
-			case 1:
-				phi = phi_tab[x_comp][y_comp] + M_PI*0.5;
-				break;
-			case 3:
-				phi = phi_tab[y_comp][x_comp] + M_PI;
-				break;
-			case 2:
-				phi = phi_tab[x_comp][y_comp] + M_PI*1.5;
-			}
+			phi = xy_phi_f(x, y);
 
 			delta = phi - rsp->prev_phi;
 			if (delta < -1*M_PI)

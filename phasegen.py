@@ -75,7 +75,7 @@ def main(args):
     #
     # Compute the arc-tangent table
     #
-    print("float phi_tab[256][256] = {", file=outfp)
+    print("double phi_tab[256][256] = {", file=outfp)
     for i in range(256):
         i_raw = crev[i]
         print("  {", file=outfp)
