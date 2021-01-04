@@ -24,15 +24,18 @@
 
 struct param {
 	int mode_capture;
+	int mode_recv;	/* 0: FM, 1: direct AM, 2: heterodyne AM */
 	int lna_gain;
 	int mix_gain;
 	int vga_gain;
-	float fm_freq;	/* in MHz */
+	float freq;	/* in MHz */
 };
 
 #define HGLEN 20
 struct rx_state {
-	struct upd uavg_i, uavg_q;
+	struct upd uavg_i, uavg_q;	/* I and Q, used for FM and FSK. */
+	struct upd uavg_am;		/* amplitude, used for AM */
+	struct upd uavg_am_base;	/* average amplitude, for AM */
 	unsigned long badx, bady;
 	double prev_phi;
 	unsigned long hgram[HGLEN];
@@ -57,7 +60,8 @@ struct packet {
 
 static int rx_state_init(struct rx_state *rsp, int avglen);
 static void rx_state_fini(struct rx_state *rsp);
-static void scan_buf(struct rx_state *rsp, struct packet *pp);
+static void scan_buf_fm(struct rx_state *rsp, struct packet *pp);
+static void scan_buf_am1(struct rx_state *rsp, struct packet *pp);
 static void dump_buf(struct rx_state *rsp, struct packet *pp);
 static void timer_print(
     unsigned long bufcnt, unsigned long bufdrop, unsigned long nocore,
@@ -65,6 +69,7 @@ static void timer_print(
 static void parse(struct param *p, char **argv);
 static void Usage(void);
 static int rx_callback(airspy_transfer_t *xfer);
+static int rx_callback_am1(airspy_transfer_t *xfer);
 static unsigned int dc_bias_update(unsigned char *sp);
 
 static struct param par;
@@ -76,7 +81,9 @@ static struct param par;
 static unsigned int dc_bias = 0x800;
 static unsigned int bias_timer;
 
-#define AVGLEN 1000	/* 20 KHz */
+#define AVGLEN            500
+#define AVGLEN_AM         997	/* almost 20 KHz */
+#define AVGLEN_AM_BASE   1000	/* 24 Hz may be okay */
 
 #define PMAX  20
 
@@ -212,7 +219,10 @@ int main(int argc, char **argv)
 		    airspy_error_name(rc), rc);
 	}
 
-	rx_cb = rx_callback;
+	if (par.mode_recv == 1)
+		rx_cb = rx_callback_am1;
+	else
+		rx_cb = rx_callback;
 	rc = airspy_start_rx(device, rx_cb, NULL);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, TAG ": airspy_start_rx() failed: %s (%d)\n",
@@ -221,7 +231,7 @@ int main(int argc, char **argv)
 	}
 
 	// No idea why the frequency is set after the start of receiving.
-	rc = airspy_set_freq(device, par.fm_freq * 1000000.0);
+	rc = airspy_set_freq(device, par.freq * 1000000.0);
 	if (rc != AIRSPY_SUCCESS) {
 		fprintf(stderr, TAG ": airspy_set_freq() failed: %s (%d)\n",
 		    airspy_error_name(rc), rc);
@@ -249,8 +259,10 @@ int main(int argc, char **argv)
 					stop = 1;
 					break;
 				}
+			} else if (par.mode_recv == 1) {
+				scan_buf_am1(&rxstate, pp);
 			} else {
-				scan_buf(&rxstate, pp);
+				scan_buf_fm(&rxstate, pp);
 			}
 
 			free(pp->buf);
@@ -317,9 +329,17 @@ static int rx_state_init(struct rx_state *rsp, int avglen)
 		goto err_i;
 	if (upd_init(&rsp->uavg_q, avglen) != 0)
 		goto err_q;
+	if (upd_init(&rsp->uavg_am, AVGLEN_AM) != 0)
+		goto err_am;
+	if (upd_init(&rsp->uavg_am_base, AVGLEN_AM_BASE) != 0)
+		goto err_am_base;
 	rsp->prev_phi = 0.0;
 	return 0;
 
+err_am_base:
+	upd_fini(&rsp->uavg_am);
+err_am:
+	upd_fini(&rsp->uavg_q);
 err_q:
 	upd_fini(&rsp->uavg_i);
 err_i:
@@ -330,9 +350,11 @@ static void rx_state_fini(struct rx_state *rsp)
 {
 	upd_fini(&rsp->uavg_i);
 	upd_fini(&rsp->uavg_q);
+	upd_fini(&rsp->uavg_am);
+	upd_fini(&rsp->uavg_am_base);
 }
 
-static void scan_buf(struct rx_state *rsp, struct packet *pp)
+static void scan_buf_fm(struct rx_state *rsp, struct packet *pp)
 {
 	const short int *p;
 	int i;
@@ -411,17 +433,89 @@ static void scan_buf(struct rx_state *rsp, struct packet *pp)
 	}
 }
 
+static void scan_buf_am1(struct rx_state *rsp, struct packet *pp)
+{
+	const short int *p;
+	int i;
+	int x;
+	int buck_x;
+	int val;
+	unsigned char lebuf[2];
+
+	p = pp->buf;
+	for (i = 0; i < pp->num; i++) {
+
+		/*
+		 * Real signal, just average it.
+		 */
+		upd_ate(&rsp->uavg_am, abs(*p));
+
+		if (rsp->fm_cnt == 0 ||
+		    rsp->fm_cnt == 833 ||
+		    rsp->fm_cnt == 1666) {
+
+			x = UPD_CUR(&rsp->uavg_am);
+			upd_ate(&rsp->uavg_am_base, x);		/* center */
+			x -= UPD_CUR(&rsp->uavg_am_base);
+
+			if (abs(x) >= 2048) {
+				rsp->badx++;
+				x = 0;
+			}
+
+			if (x < -2048) {
+				rsp->hgram_e1++;
+			} else {
+				buck_x = ((x + 2048) * HGLEN) / (2*2048);
+				if (buck_x < 0 || buck_x >= HGLEN) {
+					rsp->hgram_e2++;
+				} else {
+					rsp->hgram[buck_x]++;
+				}
+			}
+
+			val = (x * 32768) / 2048;
+			if (val < -32768) {
+				rsp->fm_e1++;
+				val = 0x8000;
+			} else if (val >= 32767) {
+				rsp->fm_e2_save_d = 0.0;
+				rsp->fm_e2_save_x = val;
+				rsp->fm_e2++;
+				val = 0x8000;
+			}
+			lebuf[0] = val & 0xFF;
+			lebuf[1] = (val >> 8) & 0xFF;
+			rsp->fm_e2 += fwrite(lebuf, 2, 1, stdout);
+		}
+		if (++rsp->fm_cnt >= 2500) {
+			rsp->fm_cnt = 0;
+		}
+
+		p += 1;
+	}
+}
+
 static void dump_buf(struct rx_state *rsp, struct packet *pp)
 {
 	const short int *p;
 	int i;
 	int lim;
 
-	p = pp->buf;
-	lim = pp->num < 1000 ? pp->num : 1000;
-	for (i = 0; i < lim; i++) {
-		printf("%d %d\n", p[0], p[1]);
-		p += 2;
+	if (par.mode_recv == 0) {
+		p = pp->buf;
+		lim = pp->num < 1000 ? pp->num : 1000;
+		for (i = 0; i < lim; i++) {
+			printf("%d %d\n", p[0], p[1]);
+			p += 2;
+		}
+	} else {
+		p = pp->buf;
+		lim = pp->num < 2000 ? pp->num : 2000;
+		for (i = 0; i < lim; i++) {
+			printf("%d\n", *p);
+			p += 1;
+		}
 	}
 }
 
@@ -438,12 +532,22 @@ static void timer_print(
 	avg_i = UPD_CUR(&rsp->uavg_i);
 	avg_q = UPD_CUR(&rsp->uavg_q);
 
-	fprintf(stderr, "# bufs %lu nocore %lu drop %lu"
-	    " badx %lu bady %lu avg I %d Q %d"
-	    " fme1 %lu fme2 %lu (d %f x %d)\n",
-	    bufcnt, nocore, bufdrop, rsp->badx, rsp->bady,
-	    avg_i, avg_q, rsp->fm_e1, rsp->fm_e2,
-	    rsp->fm_e2_save_d, rsp->fm_e2_save_x);
+	if (par.mode_recv == 0) {
+		fprintf(stderr, "# bufs %lu nocore %lu drop %lu"
+		    " badx %lu bady %lu avg I %d Q %d"
+		    " fme1 %lu fme2 %lu (d %f x %d)\n",
+		    bufcnt, nocore, bufdrop, rsp->badx, rsp->bady,
+		    avg_i, avg_q, rsp->fm_e1, rsp->fm_e2,
+		    rsp->fm_e2_save_d, rsp->fm_e2_save_x);
+	} else {
+		fprintf(stderr, "# bufs %lu nocore %lu drop %lu"
+		    " badx %lu avg amp %d center %d"
+		    " fme1 %lu fme2 %lu (d %f x %d)\n",
+		    bufcnt, nocore, bufdrop, rsp->badx,
+		    UPD_CUR(&rsp->uavg_am), UPD_CUR(&rsp->uavg_am_base),
+		    rsp->fm_e1, rsp->fm_e2,
+		    rsp->fm_e2_save_d, rsp->fm_e2_save_x);
+	}
 
 	rsp->badx = 0;
 	rsp->bady = 0;
@@ -485,8 +589,7 @@ static void parse(struct param *p, char **argv)
 	argv++;
 	while ((arg = *argv++) != NULL) {
 		if (arg[0] == '-') {
-			switch (arg[1]) {
-			case 'c':
+			if (strcmp(arg+1, "c") == 0) {
 				if ((arg = *argv++) == NULL || *arg == '-') {
 					fprintf(stderr,
 					    TAG ": missing -c threshold\n");
@@ -494,56 +597,52 @@ static void parse(struct param *p, char **argv)
 				}
 				/* if (strcmp(arg, "pre") == 0) */
 				p->mode_capture = -1;
-				break;
-			case 'g':
+			} else if (strcmp(arg+1, "ga") == 0) {	// RF gain, LNA
 				/*
 				 * These gain values are interpreted by the
 				 * firmware. They may not be directly written
 				 * into the registers of R820T2.
 				 */
-				if (arg[2] == 'a') {		// RF gain, LNA
-					if ((arg = *argv++) == NULL || *arg == '-') {
-						fprintf(stderr, TAG ": missing -ga value\n");
-						Usage();
-					}
-					lv = strtol(arg, NULL, 10);
-					if (lv < 0 || lv >= 14) {
-						fprintf(stderr, TAG ": invalid -ga value\n");
-						Usage();
-					}
-					p->lna_gain = lv;
-				} else if (arg[2] == 'm') {	// Mixer gain
-					if ((arg = *argv++) == NULL || *arg == '-') {
-						fprintf(stderr, TAG ": missing -gm value\n");
-						Usage();
-					}
-					lv = strtol(arg, NULL, 10);
-					if (lv < 0 || lv >= 15) {
-						fprintf(stderr, TAG ": invalid -gm value\n");
-						Usage();
-					}
-					p->mix_gain = lv;
-				} else if (arg[2] == 'v') {	// IF gain, VGA
-					if ((arg = *argv++) == NULL || *arg == '-') {
-						fprintf(stderr, TAG ": missing -gv value\n");
-						Usage();
-					}
-					lv = strtol(arg, NULL, 10);
-					if (lv < 0 || lv >= 15) {
-						fprintf(stderr, TAG ": invalid -gv value\n");
-						Usage();
-					}
-					p->vga_gain = lv;
-				} else {
+				if ((arg = *argv++) == NULL || *arg == '-') {
+					fprintf(stderr, TAG ": missing -ga value\n");
 					Usage();
 				}
-				break;
-			default:
+				lv = strtol(arg, NULL, 10);
+				if (lv < 0 || lv >= 14) {
+					fprintf(stderr, TAG ": invalid -ga value\n");
+					Usage();
+				}
+				p->lna_gain = lv;
+			} else if (strcmp(arg+1, "gm") == 0) {	// Mixer gain
+				if ((arg = *argv++) == NULL || *arg == '-') {
+					fprintf(stderr, TAG ": missing -gm value\n");
+					Usage();
+				}
+				lv = strtol(arg, NULL, 10);
+				if (lv < 0 || lv >= 15) {
+					fprintf(stderr, TAG ": invalid -gm value\n");
+					Usage();
+				}
+				p->mix_gain = lv;
+			} else if (strcmp(arg+1, "gv") == 0) {	// IF gain, VGA
+				if ((arg = *argv++) == NULL || *arg == '-') {
+					fprintf(stderr, TAG ": missing -gv value\n");
+					Usage();
+				}
+				lv = strtol(arg, NULL, 10);
+				if (lv < 0 || lv >= 15) {
+					fprintf(stderr, TAG ": invalid -gv value\n");
+					Usage();
+				}
+				p->vga_gain = lv;
+			} else if (strcmp(arg+1, "am1") == 0) {
+				p->mode_recv = 1;
+			} else {
 				Usage();
 			}
 		} else {
-			p->fm_freq = strtof(arg, NULL);
-			if (p->fm_freq < 60.0 || p->fm_freq >= 500.0) {
+			p->freq = strtof(arg, NULL);
+			if (p->freq < 60.0 || p->freq >= 500.0) {
 				fprintf(stderr,
 				    TAG ": frequency  is out of range"
 				    " (60.0 <= f < 500.0)\n");
@@ -555,7 +654,7 @@ static void parse(struct param *p, char **argv)
 
 static void Usage(void)
 {
-	fprintf(stderr, "Usage: " TAG " [-c NNNN]"
+	fprintf(stderr, "Usage: " TAG " [-c NNNN] [-am1]"
             " [-ga lna_gain] [-gm mix_gain] [-gv vga_gain] 93.7\n");
 	exit(1);
 }
@@ -619,6 +718,78 @@ static int rx_callback(airspy_transfer_t *xfer)
 
 		bp += 8;
 		sp += 8;
+	}
+
+	pp = malloc(sizeof(struct packet));
+	if (pp == NULL) {
+		free(bp);
+		pthread_mutex_lock(&rx_mutex);
+		c_stat.c_nocore++;
+		pthread_mutex_unlock(&rx_mutex);
+		return 0;
+	}
+	memset(pp, 0, sizeof(struct packet));
+	pp->num = xfer->sample_count;
+	pp->buf = buf;
+
+	pthread_mutex_lock(&rx_mutex);
+	if (pcnt >= PMAX) {
+		c_stat.c_bufdrop++;
+		pthread_mutex_unlock(&rx_mutex);
+		free(pp->buf);
+		free(pp);
+		return 0;
+	}
+
+	if (pcnt == 0) {
+		phead = pp;
+		ptail = pp;
+	} else {
+		ptail->next = pp;
+		ptail = pp;
+	}
+	pcnt++;
+	pthread_cond_broadcast(&rx_cond);
+	pthread_mutex_unlock(&rx_mutex);
+
+	return 0;
+}
+
+static int rx_callback_am1(airspy_transfer_t *xfer)
+{
+	int i;
+	unsigned char *sp;
+	struct packet *pp;
+	short int *buf, *bp;
+
+	if (bias_timer == 0) {
+		if (xfer->sample_count >= BVLEN) {
+			sp = xfer->samples;
+			dc_bias = dc_bias_update(sp);
+		}
+	}
+	bias_timer = (bias_timer + 1) % 10;
+
+	buf = malloc(xfer->sample_count * sizeof(short));
+	if (buf == NULL) {
+		pthread_mutex_lock(&rx_mutex);
+		c_stat.c_nocore++;
+		pthread_mutex_unlock(&rx_mutex);
+		return 0;
+	}
+
+	bp = buf;
+	sp = xfer->samples;
+	for (i = 0; i < xfer->sample_count; i += 1) {
+		unsigned int sample;
+		int value;
+
+		sample = sp[1]<<8 | sp[0];
+		value = (int) sample - (int) dc_bias;
+		*bp = value;
+
+		bp += 1;
+		sp += 2;
 	}
 
 	pp = malloc(sizeof(struct packet));
