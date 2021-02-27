@@ -4,6 +4,9 @@
 #
 
 import math
+import matplotlib
+# pylab comes from matplotlib
+import pylab
 import sys
 
 TAG="firresp"
@@ -16,6 +19,8 @@ class Param:
         skip = 1;  # Do skip=1 for full argv.
         #: Output name, stdout if not given
         self.outname = None
+        #: Plot instead of output
+        self.plot = False
         #: Sampling frequency in Hz (1e6 for RTL-SDR, 1e7 or 2e7 for AirSpy)
         self.fs = 1.0e6
         for i in range(len(argv)):
@@ -37,6 +42,8 @@ class Param:
                     except ValueError:
                         raise ParamError("Invalid float argument for -s")
                     skip = 1;
+                elif arg == "-p":
+                    self.plot = True
                 else:
                     raise ParamError("Unknown parameter " + arg)
             else:
@@ -134,6 +141,8 @@ def do_main(outfp, fs):
     # Sample from https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html#scipy.signal.firwin
     mvec = [99.99,  0.06301614,  0.88770441,  0.06301614, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+    outx = []
+    outy = []
     fn = 200   # number of plot points
     ## P3
     # fn = 10
@@ -142,7 +151,25 @@ def do_main(outfp, fs):
         # f = ((fs / 2) / fn) * n
         f = (fs / fn) * n
         h = H(mvec, f, fs)
-        outfp.write("%f %f\n" % (f, h))
+        if outfp is None:
+            outx.append(f)
+            outy.append(h)
+        else:
+            outfp.write("%f %f\n" % (f, h))
+
+    if outfp is None:
+
+        # The gtk3 window does not look any different from the default Qt, but
+        # it does not spew a bunch of dumb messages to the stderr like Qt does.
+        # (MPLBACKEND=GTK3Agg python firresp.py -p)
+        matplotlib.use('GTK3Agg')
+
+        pylab.figure(1)
+        pylab.title("H(f)")
+        pylab.grid(True)
+        pylab.plot(outx, outy)
+        pylab.show()
+
 
 def main(args):
 
@@ -150,14 +177,17 @@ def main(args):
         par = Param(args)
     except ParamError as e:
         print(TAG+": %s" % e, file=sys.stderr)
-        print("Usage:", TAG+" [-o outfile] [-s Fs]", file=sys.stderr)
+        print("Usage:", TAG+" [-p] [-o outfile] [-s Fs]", file=sys.stderr)
         return 1
 
-    if par.outname:
-        with open(par.outname, 'w') as outfp:
-            do_main(outfp, par.fs)
+    if par.plot:
+        do_main(None, par.fs)
     else:
-        do_main(sys.stdout, par.fs)
+        if par.outname:
+            with open(par.outname, 'w') as outfp:
+                do_main(outfp, par.fs)
+        else:
+            do_main(sys.stdout, par.fs)
 
     return 0
 
