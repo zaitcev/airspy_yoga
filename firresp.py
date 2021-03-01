@@ -1,12 +1,9 @@
 #!/usr/bin/python3
-# 
+#
 # Print a frequency response for a given FIR
 #
 
 import math
-import matplotlib
-# pylab comes from matplotlib
-import pylab
 import sys
 
 TAG="firresp"
@@ -49,8 +46,8 @@ class Param:
             else:
                 raise ParamError("Positional parameter supplied")
 
-# Number of filter coefficients
-M = 9
+## Number of filter coefficients
+#M = 9
 
 # Per Rob Frohne, KL7NA
 #    h = [.... coefficients .....]
@@ -63,83 +60,61 @@ M = 9
 #    H(w) = sigma[m=0,M-1]( h(m)*exp(-j*m*w) )
 # where
 #    w = [0, 2*pi / sample] or [0, 2*pi * (f/fs)]
-# Assuming quadrature-only signal:
-#    H(f) = sigma[m=0,M-1]( h(m)* sin(2*pi*(m/M)*(f/fs)) )
-# Note that this is not modH(f). However, a sine is positive for
-# f less than half of fs.
+# So, substituting w and splitting the complex exponent:
+#    H(f) = sigma[m=0,M-1]( h(m)* exp(-j * 2*pi*(f/fs) * m)) =
+#      = sigma[m=0,M-1]( h(m) * (cos(2*pi*(f/fs)*m) + -j * sin(2*pi*(f/fs)*m)))
 
 def H(mvec, f, fs):
-    ## P3
-    # print("f %f fs %f" % (f, fs))
-    retH = 0.0
+    M = len(mvec)
+    Hi = 0.0
+    Hq = 0.0
     for m in range(M):
-        ## P3
-        # print(" m %d sin %f" % (m, math.sin(2*math.pi*(float(m)/M)*(f/fs)),))
-        retH += mvec[m] * math.sin(2*math.pi*(float(m)/M)*(f/fs))
-    return retH
+        Hi += mvec[m] * math.cos(2*math.pi*(f/fs)*float(m))
+        Hq += mvec[m] * math.sin(2*math.pi*(f/fs)*float(m))
+    return math.sqrt(Hi*Hi + Hq*Hq)
 
 def do_main(outfp, fs):
 
-    # mvec = [0.0]*M
-    # Gauss with tip at 44% or 440 kHz
+    # Lyons example with a pre-calculated result. Verified to match.
+    #mvec = [0.2, 0.4, 0.4, 0.2]
+
+    # A sample from https://docs.scipy.org/doc/scipy/reference/
+    #
+    # >>> from scipy import signal
+    # >>> f1, f2 = 0.1, 0.2
+    # >>> signal.firwin(9, [f1, f2], pass_zero=False)
+    # array([-0.00838022,  0.01172673,  0.11313301,  0.27822046,  0.36236348,
+    #         0.27822046,  0.11313301,  0.01172673, -0.00838022])
+    #
+    #mvec = [-0.00838022,  0.01172673,  0.11313301,  0.27822046,  0.36236348,
+    #        0.27822046,  0.11313301,  0.01172673, -0.00838022]
+    # -- nice but this is no bandpass? pass_zero didn't work?
+
+    # >>> signal.firwin(9, [0.1, 0.2], pass_zero=True)
+    # array([ 0.00339023, -0.00474407, -0.04576816, -0.11255459,  1.31935318,
+    #        -0.11255459, -0.04576816, -0.00474407,  0.00339023])
+    #mvec = [ 0.00339023, -0.00474407, -0.04576816, -0.11255459,  1.31935318,
+    #   -0.11255459, -0.04576816, -0.00474407,  0.00339023]
+    # -- yeah, pass_zero seems inverted and f1 and f2 mean something else
+    # >>> signal.firwin(9, [0.3, 0.4], pass_zero=False)
+    #mvec = [-0.01080607, -0.09547216, -0.14588197,  0.18279623,  0.46725795,
+    #    0.18279623, -0.14588197, -0.09547216, -0.01080607]
+    # >>> signal.firwin(9, [0.3, 0.4], pass_zero=True)
+    #mvec = [ 0.00248756,  0.02197769,  0.03358202, -0.04207968,  0.96806483,
+    #     -0.04207968,  0.03358202,  0.02197769,  0.00248756]
+    # -- well this one has zero pass at 1.0, so...
+    # >>> signal.firwin(9, [0.18, 0.33], pass_zero=False)
+    mvec = [-0.03138033, -0.06681294, -0.00748198,  0.27316121,  0.45786652,
+            0.27316121, -0.00748198, -0.06681294, -0.03138033]
+
     #mvec = [0.2, 0.4, 0.8, 0.8, 0.4, 0.2, 0.3, 0.5, 0.2]
-    # Gauss with tip at 35% or 370 kHz
-    #mvec = [0.9, 0.9, 0.9, 0.9, 0.1, 0.1, 0.9, 0.9, 0.9]
-    # Looks like an exponentially decreasing sine
+    # -- ugly and lowpass
     #mvec = [0.9, -0.7, 0.6, -0.4, 0.4, -0.2, 0.2, -0.1, 0.1]
-
-    # all negaitve, with a linear segment near zero
+    # -- finally DC pass is not great, but still not what we want
     #mvec = [0.9, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.1, 0.1]
-    # The saddle is smaller than with -0.2
-    #mvec = [0.9, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.15, 0.1]
-    # Whoosh... (all negateive)
-    #mvec = [0.9, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.2, 0.1]
-    # sine!
-    #mvec = [0.9, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.3, 0.1]
-    # sine!
-    #mvec = [0.9, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.4, 0.1]
+    # -- yay bandpass, peak at 0.25*fs
 
-    # Little positive near zero?
-    #mvec = [0.9, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.15, 0.2]
-    # No difference at all! maybe zeroth coefficient does nothing.
-    #mvec = [0.5, 0.1, -0.8, -0.1, 0.7, 0.1, -0.3, -0.15, 0.2]
-
-    # Positive with a saddle ++
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.7, 0.1, -0.3, -0.15, 0.2]
-    # Wow, a big jump at the 1MHz side
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.5, 0.1, -0.3, -0.15, 0.2]
-    # Still flat, barely, but very wide
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.67, 0.1, -0.3, -0.15, 0.2]
-    # sags at the high
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.67, 0.2, -0.3, -0.15, 0.2]
-    # WTF, saddle went way down!
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.67, -0.1, -0.3, -0.15, 0.2]
-    # that's just worse than we started
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.67, 0.15, -0.3, -0.15, 0.2]
-    #
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.67, 0.1, -0.3, -0.15, 0.2]
-    # sags at the high again
-    #mvec = [99.99, 0.4, -0.5, -0.1, 0.67, 0.1, -0.2, -0.15, 0.2]
-
-    # Almost y = 0.8*x
-    #mvec = [99.99, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # sine max = 570 KHz
-    #mvec = [99.99, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-    # yep that's a sine
-    #mvec = [99.99, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    # totally a sine, shortest period
-    #mvec = [99.99, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-    #
-    # sine(x) + 0.54*sine(2x)  -> sine with peak at 300 KHz
-    #mvec = [99.99, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.54]
-
-    # sine around 500 KHz +
-    #mvec = [99.99, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]
-
-    # mvec = [99.99, -0.3, 0.0, 0.0, 1.0, 1.0, 0.0, 0.3, -0.3]
-
-    # Sample from https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html#scipy.signal.firwin
-    mvec = [99.99,  0.06301614,  0.88770441,  0.06301614, 0.0, 0.0, 0.0, 0.0, 0.0]
+    #mvec = [0.99, 0.1, 0.1, 0.1, 0.1]
 
     outx = []
     outy = []
@@ -147,8 +122,6 @@ def do_main(outfp, fs):
     ## P3
     # fn = 10
     for n in range(fn):
-        # We only go up to fs/2 because we'll smooth it all out in leu of LPF.
-        # f = ((fs / 2) / fn) * n
         f = (fs / fn) * n
         h = H(mvec, f, fs)
         if outfp is None:
@@ -158,6 +131,9 @@ def do_main(outfp, fs):
             outfp.write("%f %f\n" % (f, h))
 
     if outfp is None:
+
+        import matplotlib
+        import pylab
 
         # The gtk3 window does not look any different from the default Qt, but
         # it does not spew a bunch of dumb messages to the stderr like Qt does.
